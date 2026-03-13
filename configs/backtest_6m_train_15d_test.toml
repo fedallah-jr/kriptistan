@@ -1,0 +1,61 @@
+[backtest]
+start = 2026-02-21T00:00:00Z
+end = 2026-03-13T00:00:00Z
+signal_timeframe = "1h"
+scanner_timeframe = "1d"
+entry_delay_seconds = 5
+entry_window_seconds = 15
+warmup_days = 250
+starting_balance = 1000.0
+capital_mode = "per_bot"
+top_candidates = 50
+collision_policy = "seeded_shuffle"
+shuffle_seed = 7
+exact_mode = true
+exact_mode_max_history_days = 365
+use_closed_candles_only = true
+use_previous_day_fng = true
+
+[execution]
+taker_fee_rate = 0.0005
+btc_vol_guard_enabled = true
+btc_vol_max_range_pct = 2.0
+btc_vol_max_candle_pct = 0.5
+btc_vol_cooldown_seconds = 600
+chase_filter_enabled = true
+chase_close_pos = 0.85
+chase_range_mult_tp = 1.0
+btc_confirm_entry_enabled = true
+
+[walk_forward]
+enabled = true
+train_days = 15
+test_days = 5
+step_days = 5
+warmup_days = 250
+objective_metric = "net_profit_pct"
+max_combinations = 1
+
+[[walk_forward.bot_grids]]
+bot_name = "trend_mom"
+parameters = { tp_percent = [1.5], sl_percent = [1.0], risk_aversion = [1.0] }
+
+[[bots]]
+name = "trend_mom"
+strategy = "TREND_MOM"
+max_open_trades = 3
+leverage = 2
+tp_percent = 1.5
+sl_percent = 1.0
+min_24h_volume = 2000000
+due_date_min = -5.0
+due_date_max = 5.0
+same_ticker_cooldown_hours = 1
+dead_end_max_consecutive_losses = 2
+dead_end_lookback_days = 7
+dead_end_blacklist_days = 3
+fng_enabled = true
+risk_aversion = 1.0
+reverse_mode = false
+fixed_priority = 100
+symbol_whitelist = []
