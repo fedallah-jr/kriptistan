@@ -104,6 +104,8 @@ class Backtester:
             claims: list[EntryClaim] = []
             btc_guard_active = self._btc_guard_active(timestamp)
             base_candidates = self._scanner_candidates(timestamp)
+            idx_cache: dict[str, int] = {}
+            slice_cache: dict[str, list] = {}
             for runtime in runtimes:
                 if runtime.available_slots <= 0:
                     runtime.ledger.equity_points.append(runtime.ledger.current_balance)
@@ -111,8 +113,11 @@ class Backtester:
                 for candidate in self._filter_candidates(runtime, base_candidates, timestamp, open_symbols):
                     symbol_data = self.bundle.symbols[candidate.symbol]
                     indicators = self._get_indicators(candidate.symbol)
-                    end_idx = symbol_data.futures_1h.closed_until_idx(timestamp)
-                    candles = symbol_data.futures_1h.last_n_closed(timestamp, 300)
+                    if candidate.symbol not in idx_cache:
+                        idx_cache[candidate.symbol] = symbol_data.futures_1h.closed_until_idx(timestamp)
+                        slice_cache[candidate.symbol] = symbol_data.futures_1h.last_n_closed(timestamp, 300)
+                    end_idx = idx_cache[candidate.symbol]
+                    candles = slice_cache[candidate.symbol]
                     decision = evaluate_strategy(
                         runtime.config.strategy,
                         StrategyContext(

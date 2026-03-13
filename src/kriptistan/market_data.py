@@ -93,6 +93,7 @@ class MarketDataBundle:
     fng_points: list[FearGreedPoint]
     repo: "MarketDataRepository"
     _cycle_cache: dict[tuple[str, datetime], CycleStats | None] = field(default_factory=dict)
+    _volume_cache: dict[tuple[str, datetime], float] = field(default_factory=dict)
 
     def hourly_timestamps(self, *, start: datetime, end: datetime) -> list[datetime]:
         reference = next(iter(self.symbols.values())).futures_1h
@@ -120,9 +121,15 @@ class MarketDataBundle:
         daily = data.closed_confirm_daily(as_of)
         if not daily:
             return None
+        key = (f"confirm:{symbol}", daily[-1].close_time)
+        cached = self._cycle_cache.get(key)
+        if cached is not None or key in self._cycle_cache:
+            return cached
         from .cycles import scan_symbol_cycles
 
-        return scan_symbol_cycles(data.confirm_symbol, daily)
+        stats = scan_symbol_cycles(data.confirm_symbol, daily)
+        self._cycle_cache[key] = stats
+        return stats
 
     def btc_guard_slice(self, as_of: datetime) -> list[Candle]:
         closed = self.btc_5m.closed_until(as_of)
@@ -133,8 +140,14 @@ class MarketDataBundle:
         return point.value if point is not None else None
 
     def quote_volume_24h(self, symbol: str, as_of: datetime) -> float:
+        key = (symbol, as_of)
+        cached = self._volume_cache.get(key)
+        if cached is not None:
+            return cached
         recent = self.symbols[symbol].futures_1h.last_n_closed(as_of, 24)
-        return sum(candle.quote_volume for candle in recent)
+        result = sum(candle.quote_volume for candle in recent)
+        self._volume_cache[key] = result
+        return result
 
     def minute_candles(self, symbol: str) -> list[Candle]:
         data = self.symbols[symbol]
