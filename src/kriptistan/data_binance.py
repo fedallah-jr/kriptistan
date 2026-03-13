@@ -3,13 +3,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import json
+import sys
 import time
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
 from .cache import JsonCache
 from .models import AggTrade, Candle, ExchangeSymbol
+
+_DEFAULT_HTTP_RETRY_DELAY_SECONDS = 15.0
+_MAX_HTTP_RETRY_DELAY_SECONDS = 300.0
+_RETRYABLE_HTTP_STATUS_CODES = {418, 429}
 
 
 @dataclass(slots=True)
@@ -112,16 +118,14 @@ class BinanceFuturesPublicClient:
         return [_parse_agg_trade(item) for item in payload]
 
     def _get_json(self, path: str, params: dict[str, Any], *, weight: int) -> Any:
-        cache_key = [path] + [f"{key}={params[key]}" for key in sorted(params)]
-        cached = self.cache.get("binance", cache_key)
-        if cached is not None:
-            return cached
-        self.rate_limiter.acquire(weight)
-        query = urlencode(params)
-        with urlopen(f"{self.base_url}{path}?{query}") as response:
-            payload = json.loads(response.read())
-        self.cache.set("binance", cache_key, payload)
-        return payload
+        return _get_json_with_backoff(
+            cache=self.cache,
+            rate_limiter=self.rate_limiter,
+            base_url=self.base_url,
+            path=path,
+            params=params,
+            weight=weight,
+        )
 
 
 @dataclass(slots=True)
@@ -175,16 +179,77 @@ class BinanceSpotPublicClient:
         return [_parse_kline(item) for item in payload]
 
     def _get_json(self, path: str, params: dict[str, Any], *, weight: int) -> Any:
-        cache_key = [path] + [f"{key}={params[key]}" for key in sorted(params)]
-        cached = self.cache.get("binance", cache_key)
-        if cached is not None:
-            return cached
-        self.rate_limiter.acquire(weight)
-        query = urlencode(params)
-        with urlopen(f"{self.base_url}{path}?{query}") as response:
-            payload = json.loads(response.read())
-        self.cache.set("binance", cache_key, payload)
+        return _get_json_with_backoff(
+            cache=self.cache,
+            rate_limiter=self.rate_limiter,
+            base_url=self.base_url,
+            path=path,
+            params=params,
+            weight=weight,
+        )
+
+
+def _get_json_with_backoff(
+    *,
+    cache: JsonCache,
+    rate_limiter: RateLimiter,
+    base_url: str,
+    path: str,
+    params: dict[str, Any],
+    weight: int,
+) -> Any:
+    cache_key = [path] + [f"{key}={params[key]}" for key in sorted(params)]
+    cached = cache.get("binance", cache_key)
+    if cached is not None:
+        return cached
+
+    query = urlencode(params)
+    url = f"{base_url}{path}?{query}"
+    next_delay = _DEFAULT_HTTP_RETRY_DELAY_SECONDS
+    attempt = 1
+    while True:
+        rate_limiter.acquire(weight)
+        try:
+            with urlopen(url) as response:
+                payload = json.loads(response.read())
+        except HTTPError as exc:
+            if exc.code not in _RETRYABLE_HTTP_STATUS_CODES:
+                raise
+            delay = _retry_delay_seconds(exc, fallback_seconds=next_delay)
+            _log_rate_limit_wait(path=path, params=params, status_code=exc.code, delay_seconds=delay, attempt=attempt)
+            time.sleep(delay)
+            next_delay = min(max(delay * 2, _DEFAULT_HTTP_RETRY_DELAY_SECONDS), _MAX_HTTP_RETRY_DELAY_SECONDS)
+            attempt += 1
+            continue
+        cache.set("binance", cache_key, payload)
         return payload
+
+
+def _retry_delay_seconds(exc: HTTPError, *, fallback_seconds: float) -> float:
+    if exc.headers is not None:
+        retry_after = exc.headers.get("Retry-After")
+        if retry_after is not None:
+            try:
+                return max(float(retry_after), 0.0)
+            except ValueError:
+                pass
+    return fallback_seconds
+
+
+def _log_rate_limit_wait(
+    *,
+    path: str,
+    params: dict[str, Any],
+    status_code: int,
+    delay_seconds: float,
+    attempt: int,
+) -> None:
+    symbol = params.get("symbol")
+    target = f"{path} symbol={symbol}" if symbol is not None else path
+    print(
+        f"Binance throttled ({status_code}) on {target}; waiting {delay_seconds:.1f}s before retry {attempt + 1}.",
+        file=sys.stderr,
+    )
 
 
 def _parse_kline(row: list[Any]) -> Candle:

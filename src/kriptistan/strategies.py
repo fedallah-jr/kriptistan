@@ -9,12 +9,19 @@ StrategyFn = Callable[[StrategyContext], StrategyDecision | None]
 
 
 def technical_score(context: StrategyContext) -> int:
-    candle_slice = context.candles
-    close_values = closes(candle_slice)
-    ema200 = ema(close_values, 200)[-1]
-    rsi14 = rsi(close_values, 14)[-1]
-    atr14 = atr(candle_slice, 14)[-1]
-    latest_close = close_values[-1]
+    if context.indicators is not None and context.candle_end_idx is not None:
+        idx = context.candle_end_idx - 1
+        ema200 = context.indicators.ema_200[idx]
+        rsi14 = context.indicators.rsi_14[idx]
+        atr14 = context.indicators.atr_14[idx]
+        latest_close = context.indicators.closes[idx]
+    else:
+        candle_slice = context.candles
+        close_values = closes(candle_slice)
+        ema200 = ema(close_values, 200)[-1]
+        rsi14 = rsi(close_values, 14)[-1]
+        atr14 = atr(candle_slice, 14)[-1]
+        latest_close = close_values[-1]
 
     score = 0
     if ema200 is not None and latest_close > ema200:
@@ -46,7 +53,10 @@ def scalper(context: StrategyContext) -> StrategyDecision | None:
         return None
     latest = context.candles[-1]
     previous = context.candles[-2]
-    current_vwap = vwap(context.candles)
+    if context.indicators is not None and context.candle_end_idx is not None:
+        current_vwap = context.indicators.cumulative_vwap[context.candle_end_idx - 1]
+    else:
+        current_vwap = vwap(context.candles)
     if current_vwap is None or current_vwap == 0:
         return None
     proximity = abs((latest.close - current_vwap) / current_vwap) * 100
@@ -59,25 +69,43 @@ def scalper(context: StrategyContext) -> StrategyDecision | None:
 def sniper(context: StrategyContext) -> StrategyDecision | None:
     if len(context.candles) < 2:
         return None
-    close_values = closes(context.candles)
-    lowest = min(lows(context.candles))
-    highest = max(highs(context.candles))
+    if context.indicators is not None and context.candle_end_idx is not None:
+        idx = context.candle_end_idx
+        close_cur = context.indicators.closes[idx - 1]
+        close_prev = context.indicators.closes[idx - 2]
+        lowest = context.indicators.running_low[idx - 1]
+        highest = context.indicators.running_high[idx - 1]
+    else:
+        close_values = closes(context.candles)
+        close_cur = close_values[-1]
+        close_prev = close_values[-2]
+        lowest = min(lows(context.candles))
+        highest = max(highs(context.candles))
     fib382 = lowest + ((highest - lowest) * 0.382)
     score = technical_score(context)
-    if score >= 2 and close_values[-1] > fib382 and close_values[-2] < fib382:
-        distance = abs(close_values[-1] - fib382) / fib382 if fib382 else 1.0
+    if score >= 2 and close_cur > fib382 and close_prev < fib382:
+        distance = abs(close_cur - fib382) / fib382 if fib382 else 1.0
         return StrategyDecision(Side.LONG, "0.382 Reclaim Confirmed", score, 1 / (1 + distance))
     return None
 
 
 def bounce(context: StrategyContext) -> StrategyDecision | None:
-    close_values = closes(context.candles)
-    rsi14 = rsi(close_values, 14)
-    if len(rsi14) < 2 or rsi14[-2] is None or rsi14[-1] is None:
+    if context.indicators is not None and context.candle_end_idx is not None:
+        idx = context.candle_end_idx - 1
+        rsi_cur = context.indicators.rsi_14[idx]
+        rsi_prev = context.indicators.rsi_14[idx - 1] if idx > 0 else None
+    else:
+        close_values = closes(context.candles)
+        rsi14 = rsi(close_values, 14)
+        if len(rsi14) < 2:
+            return None
+        rsi_cur = rsi14[-1]
+        rsi_prev = rsi14[-2]
+    if rsi_prev is None or rsi_cur is None:
         return None
     score = technical_score(context)
-    if rsi14[-2] < 35 <= rsi14[-1]:
-        return StrategyDecision(Side.LONG, "RSI Oversold Bounce", score, (35 - rsi14[-2]) + (rsi14[-1] - 35))
+    if rsi_prev < 35 <= rsi_cur:
+        return StrategyDecision(Side.LONG, "RSI Oversold Bounce", score, (35 - rsi_prev) + (rsi_cur - 35))
     return None
 
 
@@ -85,7 +113,10 @@ def cycle_rev(context: StrategyContext) -> StrategyDecision | None:
     if context.cycle_stats is None:
         return None
     latest = context.candles[-1]
-    ema50 = ema(closes(context.candles), 50)[-1]
+    if context.indicators is not None and context.candle_end_idx is not None:
+        ema50 = context.indicators.ema_50[context.candle_end_idx - 1]
+    else:
+        ema50 = ema(closes(context.candles), 50)[-1]
     pump_due = context.cycle_stats.pump_date_due_days
     dump_due = context.cycle_stats.dump_date_due_days
     score = technical_score(context)
@@ -104,11 +135,18 @@ def cycle_rev(context: StrategyContext) -> StrategyDecision | None:
 def trend_mom(context: StrategyContext) -> StrategyDecision | None:
     if context.cycle_stats is None or len(context.candles) < 21:
         return None
-    close_values = closes(context.candles)
-    ema200 = ema(close_values, 200)[-1]
-    prev_20_high = max(highs(context.candles[-21:-1]))
-    prev_20_low = min(lows(context.candles[-21:-1]))
-    latest_close = close_values[-1]
+    if context.indicators is not None and context.candle_end_idx is not None:
+        idx = context.candle_end_idx
+        ema200 = context.indicators.ema_200[idx - 1]
+        latest_close = context.indicators.closes[idx - 1]
+        prev_20_high = max(context.indicators.highs[idx - 21:idx - 1])
+        prev_20_low = min(context.indicators.lows[idx - 21:idx - 1])
+    else:
+        close_values = closes(context.candles)
+        ema200 = ema(close_values, 200)[-1]
+        prev_20_high = max(highs(context.candles[-21:-1]))
+        prev_20_low = min(lows(context.candles[-21:-1]))
+        latest_close = close_values[-1]
     pump_due = context.cycle_stats.pump_date_due_days
     dump_due = context.cycle_stats.dump_date_due_days
     score = technical_score(context)
@@ -122,8 +160,10 @@ def trend_mom(context: StrategyContext) -> StrategyDecision | None:
 def breakout_retest(context: StrategyContext) -> StrategyDecision | None:
     if len(context.candles) < 60:
         return None
-    close_values = closes(context.candles)
-    ema200 = ema(close_values, 200)[-1]
+    if context.indicators is not None and context.candle_end_idx is not None:
+        ema200 = context.indicators.ema_200[context.candle_end_idx - 1]
+    else:
+        ema200 = ema(closes(context.candles), 200)[-1]
     latest = context.candles[-1]
     if ema200 is None or latest.close <= ema200:
         return None
@@ -144,17 +184,25 @@ def pullback_reclaim(context: StrategyContext) -> StrategyDecision | None:
         return None
     latest = context.candles[-1]
     previous = context.candles[-2]
-    close_values = closes(context.candles)
-    ema200 = ema(close_values, 200)[-1]
-    ema20 = ema(close_values, 20)
-    if ema200 is None or ema20[-1] is None or ema20[-2] is None or latest.close <= ema200:
+    if context.indicators is not None and context.candle_end_idx is not None:
+        idx = context.candle_end_idx
+        ema200 = context.indicators.ema_200[idx - 1]
+        ema20_cur = context.indicators.ema_20[idx - 1]
+        ema20_prev = context.indicators.ema_20[idx - 2]
+    else:
+        close_values = closes(context.candles)
+        ema200 = ema(close_values, 200)[-1]
+        ema20 = ema(close_values, 20)
+        ema20_cur = ema20[-1]
+        ema20_prev = ema20[-2]
+    if ema200 is None or ema20_cur is None or ema20_prev is None or latest.close <= ema200:
         return None
     previous_ranges = [candle.range for candle in context.candles[-17:-2]]
     if not previous_ranges:
         return None
     average_range = sum(previous_ranges) / len(previous_ranges)
     score = technical_score(context)
-    if previous.range > 1.8 * average_range and previous.close < ema20[-2] and latest.close > ema20[-1] and latest.is_bullish:
+    if previous.range > 1.8 * average_range and previous.close < ema20_prev and latest.close > ema20_cur and latest.is_bullish:
         strength = previous.range / average_range if average_range else 0.0
         return StrategyDecision(Side.LONG, "Pullback Reclaim Long", score, strength)
     return None

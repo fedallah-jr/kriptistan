@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from .models import Candle
+from .models import Candle, PrecomputedIndicators
 
 
 def closes(candles: Iterable[Candle]) -> list[float]:
@@ -121,3 +121,52 @@ def _rsi_from_avgs(avg_gain: float, avg_loss: float) -> float:
         return 100.0
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
+
+
+def precompute_indicators(candles: list[Candle]) -> PrecomputedIndicators:
+    close_values = closes(candles)
+    high_values = highs(candles)
+    low_values = lows(candles)
+    return PrecomputedIndicators(
+        closes=close_values,
+        highs=high_values,
+        lows=low_values,
+        ema_20=ema(close_values, 20),
+        ema_50=ema(close_values, 50),
+        ema_200=ema(close_values, 200),
+        rsi_14=rsi(close_values, 14),
+        atr_14=atr(candles, 14),
+        cumulative_vwap=_cumulative_vwap(candles),
+        running_high=_running_max(high_values),
+        running_low=_running_min(low_values),
+    )
+
+
+def _cumulative_vwap(candles: list[Candle]) -> list[float | None]:
+    result: list[float | None] = []
+    cum_pv = 0.0
+    cum_v = 0.0
+    for candle in candles:
+        typical = (candle.high + candle.low + candle.close) / 3
+        cum_pv += typical * candle.volume
+        cum_v += candle.volume
+        result.append(cum_pv / cum_v if cum_v > 0 else None)
+    return result
+
+
+def _running_max(values: list[float]) -> list[float]:
+    result: list[float] = []
+    current = float("-inf")
+    for v in values:
+        current = max(current, v)
+        result.append(current)
+    return result
+
+
+def _running_min(values: list[float]) -> list[float]:
+    result: list[float] = []
+    current = float("inf")
+    for v in values:
+        current = min(current, v)
+        result.append(current)
+    return result

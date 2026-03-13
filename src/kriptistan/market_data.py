@@ -11,6 +11,15 @@ from .data_binance import BinanceFuturesPublicClient, BinanceSpotPublicClient
 from .data_fng import FearGreedClient, FearGreedPoint
 from .models import AggTrade, Candle, CycleStats, ExchangeSymbol
 
+# EMA-200 is the largest indicator period; drives hourly warmup requirement.
+_MAX_INDICATOR_PERIOD = 200
+# BTC vol guard scans at most 36 five-minute candles (3 hours).
+_BTC_5M_LOOKBACK = 36
+
+
+class InsufficientMarketDataError(ValueError):
+    """Raised when the requested symbol set cannot satisfy backtest data requirements."""
+
 
 @dataclass(slots=True)
 class CandleSeries:
@@ -31,6 +40,14 @@ class CandleSeries:
         left = bisect_left(self._open_times, start)
         right = bisect_left(self._open_times, end)
         return self.candles[left:right]
+
+    def closed_until_idx(self, as_of: datetime) -> int:
+        return bisect_right(self._close_times, as_of)
+
+    def last_n_closed(self, as_of: datetime, n: int) -> list[Candle]:
+        idx = bisect_right(self._close_times, as_of)
+        start = max(0, idx - n)
+        return self.candles[start:idx]
 
 
 @dataclass(slots=True)
@@ -116,8 +133,7 @@ class MarketDataBundle:
         return point.value if point is not None else None
 
     def quote_volume_24h(self, symbol: str, as_of: datetime) -> float:
-        hourly = self.symbols[symbol].closed_hourly(as_of)
-        recent = hourly[-24:]
+        recent = self.symbols[symbol].futures_1h.last_n_closed(as_of, 24)
         return sum(candle.quote_volume for candle in recent)
 
     def minute_candles(self, symbol: str) -> list[Candle]:
@@ -126,7 +142,7 @@ class MarketDataBundle:
             candles = self.repo.fetch_futures_klines(
                 symbol=symbol,
                 interval="1m",
-                start=self.warmup_start,
+                start=self.start,
                 end=self.end,
             )
             data._futures_1m = CandleSeries(candles)
@@ -176,20 +192,35 @@ class MarketDataRepository:
         futures_symbols = self.list_futures_symbols()
         selected = symbols or sorted(futures_symbols)
         warmup = warmup_days if warmup_days is not None else self.config.backtest.warmup_days
-        warmup_start = self.config.backtest.start - timedelta(days=warmup)
+        start = self.config.backtest.start
+        end = self.config.backtest.end
+
+        # Per-timeframe warmup: daily needs full history for cycle detection,
+        # hourly only needs enough for the largest indicator (EMA-200 = 200 candles),
+        # 5m only needs ~36 candles for BTC vol guard.
+        daily_warmup_start = start - timedelta(days=warmup)
+        hourly_warmup_days = (_MAX_INDICATOR_PERIOD // 24) + 2  # 10 days ≈ 240 candles
+        hourly_warmup_start = start - timedelta(days=hourly_warmup_days)
+        btc_5m_warmup_start = start - timedelta(days=1)
+
         spot_symbols = self.list_spot_symbols() if self.config.execution.btc_confirm_entry_enabled else {}
         symbol_data: dict[str, SymbolMarketData] = {}
+        skipped_symbols: list[tuple[str, int]] = []
 
         for symbol in selected:
             meta = futures_symbols[symbol]
-            futures_1d = CandleSeries(self.fetch_futures_klines(symbol=symbol, interval="1d", start=warmup_start, end=self.config.backtest.end))
-            futures_1h = CandleSeries(self.fetch_futures_klines(symbol=symbol, interval="1h", start=warmup_start, end=self.config.backtest.end))
+            futures_1h = CandleSeries(self.fetch_futures_klines(symbol=symbol, interval="1h", start=hourly_warmup_start, end=end))
+            hourly_count = futures_1h.closed_until_idx(start)
+            if hourly_count < _MAX_INDICATOR_PERIOD:
+                skipped_symbols.append((symbol, hourly_count))
+                continue
+            futures_1d = CandleSeries(self.fetch_futures_klines(symbol=symbol, interval="1d", start=daily_warmup_start, end=end))
             confirm_symbol = f"{meta.base_asset}BTC"
             confirm_1d = None
             confirm_1h = None
             if confirm_symbol in spot_symbols:
-                confirm_1d = CandleSeries(self.fetch_spot_klines(symbol=confirm_symbol, interval="1d", start=warmup_start, end=self.config.backtest.end))
-                confirm_1h = CandleSeries(self.fetch_spot_klines(symbol=confirm_symbol, interval="1h", start=warmup_start, end=self.config.backtest.end))
+                confirm_1d = CandleSeries(self.fetch_spot_klines(symbol=confirm_symbol, interval="1d", start=daily_warmup_start, end=end))
+                confirm_1h = CandleSeries(self.fetch_spot_klines(symbol=confirm_symbol, interval="1h", start=hourly_warmup_start, end=end))
             symbol_data[symbol] = SymbolMarketData(
                 symbol=symbol,
                 exchange_symbol=meta,
@@ -200,17 +231,26 @@ class MarketDataRepository:
                 confirm_1h=confirm_1h,
             )
 
-        btc_5m = CandleSeries(self.fetch_futures_klines(symbol="BTCUSDT", interval="5m", start=warmup_start, end=self.config.backtest.end))
+        _report_skipped_hourly_warmup(start=start, short_symbols=skipped_symbols)
+        if not symbol_data:
+            raise InsufficientMarketDataError(
+                f"No symbols have at least {_MAX_INDICATOR_PERIOD} closed hourly candles before "
+                f"backtest start {start.isoformat()}."
+            )
+
+        btc_5m = CandleSeries(self.fetch_futures_klines(symbol="BTCUSDT", interval="5m", start=btc_5m_warmup_start, end=end))
         fng_points = self.fng.history(limit=0)
-        return MarketDataBundle(
-            start=self.config.backtest.start,
-            end=self.config.backtest.end,
-            warmup_start=warmup_start,
+        bundle = MarketDataBundle(
+            start=start,
+            end=end,
+            warmup_start=daily_warmup_start,
             symbols=symbol_data,
             btc_5m=btc_5m,
             fng_points=fng_points,
             repo=self,
         )
+        _validate_hourly_warmup(bundle)
+        return bundle
 
     def fetch_futures_klines(self, *, symbol: str, interval: str, start: datetime, end: datetime) -> list[Candle]:
         client = self.futures
@@ -266,6 +306,33 @@ class MarketDataRepository:
                 break
             cursor = next_cursor
         return sorted({trade.trade_id: trade for trade in results}.values(), key=lambda item: (item.timestamp, item.trade_id))
+
+
+def _validate_hourly_warmup(bundle: MarketDataBundle) -> None:
+    """Ensure no symbol with insufficient hourly warmup reaches the backtest bundle."""
+    short_symbols: list[tuple[str, int]] = []
+    for symbol, data in bundle.symbols.items():
+        count = data.futures_1h.closed_until_idx(bundle.start)
+        if count < _MAX_INDICATOR_PERIOD:
+            short_symbols.append((symbol, count))
+    if short_symbols:
+        raise InsufficientMarketDataError(
+            f"Bundle contains {len(short_symbols)} symbol(s) with fewer than "
+            f"{_MAX_INDICATOR_PERIOD} closed hourly candles before backtest start."
+        )
+
+
+def _report_skipped_hourly_warmup(*, start: datetime, short_symbols: list[tuple[str, int]]) -> None:
+    if not short_symbols:
+        return
+    print(
+        f"Skipping {len(short_symbols)} symbol(s) with fewer than {_MAX_INDICATOR_PERIOD} "
+        f"closed hourly candles before backtest start {start.isoformat()}:"
+    )
+    for symbol, count in short_symbols[:5]:
+        print(f"  {symbol}: {count} candles")
+    if len(short_symbols) > 5:
+        print(f"  ... and {len(short_symbols) - 5} more")
 
 
 def _dedupe_candles(candles: list[Candle]) -> list[Candle]:

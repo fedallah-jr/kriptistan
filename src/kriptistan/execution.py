@@ -133,39 +133,22 @@ def resolve_exit_hierarchical(
     )
     if trade_hit is not None:
         return trade_hit
-    if not entry_trades:
-        entry_minute = next((candle for candle in minute_candles if candle.open_time == entry_minute_start), None)
-        if entry_minute is not None:
-            outcome = _barrier_outcome(entry_minute, position.side, position.tp_price, position.sl_price)
-            if outcome == ExitReason.TP:
-                return ExitResolution(ExitReason.TP, entry_minute.close_time, position.tp_price, ResolutionLevel.MINUTE)
-            if outcome == ExitReason.SL or outcome is None:
-                return ExitResolution(ExitReason.SL, entry_minute.close_time, position.sl_price, ResolutionLevel.MINUTE)
 
+    # Entry can happen a few seconds after the hour boundary. After protecting
+    # that first partial minute with exact trades, the simulator resolves exits
+    # hour-first to match its hourly decision cadence.
     first_hour_end = position.entry_time.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     same_hour_minutes = [candle for candle in minute_candles if entry_minute_end <= candle.open_time < first_hour_end]
-    minute_hit = _resolve_candles(
-        same_hour_minutes,
+    same_hour_hit = _resolve_hour_interval(
+        candles=same_hour_minutes,
         side=position.side,
         tp_price=position.tp_price,
         sl_price=position.sl_price,
-        resolution_level=ResolutionLevel.MINUTE,
+        close_time=first_hour_end,
         agg_trade_loader=agg_trade_loader,
     )
-    if minute_hit is not None:
-        return minute_hit
-
-    if day_candles:
-        day_hit = _resolve_days(
-            day_candles,
-            hour_candles=hour_candles,
-            minute_candles=minute_candles,
-            position=position,
-            agg_trade_loader=agg_trade_loader,
-            first_hour_end=first_hour_end,
-        )
-        if day_hit is not None:
-            return day_hit
+    if same_hour_hit is not None:
+        return same_hour_hit
 
     later_hours = [candle for candle in hour_candles if candle.open_time >= first_hour_end]
     hour_hit = _resolve_candles(
@@ -197,35 +180,29 @@ def compute_pnl_percent(position: Position, exit_price: float, *, taker_fee_rate
     return gross - fee_drag
 
 
-def _resolve_days(
-    day_candles: list[Candle],
+def _resolve_hour_interval(
+    candles: list[Candle],
     *,
-    hour_candles: list[Candle],
-    minute_candles: list[Candle],
-    position: Position,
+    side: Side,
+    tp_price: float,
+    sl_price: float,
+    close_time: datetime,
     agg_trade_loader: AggTradeLoader,
-    first_hour_end: datetime,
 ) -> ExitResolution | None:
-    later_days = [candle for candle in day_candles if candle.open_time.date() > position.entry_time.date()]
-    for candle in later_days:
-        outcome = _barrier_outcome(candle, position.side, position.tp_price, position.sl_price)
-        if outcome == ExitReason.OPEN:
-            continue
-        if outcome in (ExitReason.TP, ExitReason.SL):
-            return ExitResolution(outcome, candle.close_time, _price_for_reason(position, outcome), ResolutionLevel.DAY)
-        day_hours = [hour for hour in hour_candles if candle.open_time <= hour.open_time < candle.close_time and hour.open_time >= first_hour_end]
-        nested = _resolve_candles(
-            day_hours,
-            side=position.side,
-            tp_price=position.tp_price,
-            sl_price=position.sl_price,
-            resolution_level=ResolutionLevel.HOUR,
-            agg_trade_loader=agg_trade_loader,
-            minute_candles=minute_candles,
-        )
-        if nested is not None:
-            return nested
-    return None
+    outcome = _barrier_outcome_for_candles(candles, side=side, tp_price=tp_price, sl_price=sl_price)
+    if outcome == ExitReason.OPEN:
+        return None
+    if outcome in (ExitReason.TP, ExitReason.SL):
+        return ExitResolution(outcome, close_time, tp_price if outcome is ExitReason.TP else sl_price, ResolutionLevel.HOUR)
+    nested = _resolve_candles(
+        candles,
+        side=side,
+        tp_price=tp_price,
+        sl_price=sl_price,
+        resolution_level=ResolutionLevel.MINUTE,
+        agg_trade_loader=agg_trade_loader,
+    )
+    return nested if nested is not None else ExitResolution(ExitReason.SL, close_time, sl_price, ResolutionLevel.HOUR)
 
 
 def _resolve_candles(
@@ -268,6 +245,31 @@ def _resolve_candles(
             if nested is not None:
                 return nested
     return None
+
+
+def _barrier_outcome_for_candles(
+    candles: list[Candle],
+    *,
+    side: Side,
+    tp_price: float,
+    sl_price: float,
+) -> ExitReason | None:
+    if not candles:
+        return ExitReason.OPEN
+    tp_touched = False
+    sl_touched = False
+    for candle in candles:
+        if side is Side.LONG:
+            tp_touched = tp_touched or candle.high >= tp_price
+            sl_touched = sl_touched or candle.low <= sl_price
+        else:
+            tp_touched = tp_touched or candle.low <= tp_price
+            sl_touched = sl_touched or candle.high >= sl_price
+        if tp_touched and sl_touched:
+            return None
+    if not tp_touched and not sl_touched:
+        return ExitReason.OPEN
+    return ExitReason.TP if tp_touched else ExitReason.SL
 
 
 def _resolve_with_agg_trades(

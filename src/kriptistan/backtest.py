@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from .config import AppConfig, BotConfig
 from .execution import approximate_entry_price_band, compute_effective_tp_sl, compute_pnl_percent, resolve_exit_hierarchical, select_entry_price_band
 from .gates import anti_repetition_guard, btc_vol_guard_triggered, chase_filter_passes, dead_end_blacklisted, due_date_in_range, resolve_collisions, symbol_on_cooldown
+from .indicators import precompute_indicators
 from .market_data import MarketDataBundle
 from .models import Candidate, CollisionPolicy, CycleStats, EntryClaim, ExitReason, Position, ScheduledTrade, Side, StrategyContext
 from .reports import BotLedger, build_portfolio_result
@@ -40,6 +41,7 @@ class Backtester:
         self.bundle = bundle
         self._scanner_cache: dict[datetime, list[Candidate]] = {}
         self._btc_guard_cache: dict[datetime, bool] = {}
+        self._indicator_cache: dict[str, object] = {}
 
     def run(
         self,
@@ -108,7 +110,9 @@ class Backtester:
                     continue
                 for candidate in self._filter_candidates(runtime, base_candidates, timestamp, open_symbols):
                     symbol_data = self.bundle.symbols[candidate.symbol]
-                    candles = symbol_data.closed_hourly(timestamp)
+                    indicators = self._get_indicators(candidate.symbol)
+                    end_idx = symbol_data.futures_1h.closed_until_idx(timestamp)
+                    candles = symbol_data.futures_1h.last_n_closed(timestamp, 300)
                     decision = evaluate_strategy(
                         runtime.config.strategy,
                         StrategyContext(
@@ -116,6 +120,8 @@ class Backtester:
                             candles=candles,
                             cycle_stats=candidate.cycle_stats,
                             tp_percent=runtime.config.tp_percent,
+                            indicators=indicators,
+                            candle_end_idx=end_idx,
                         ),
                     )
                     if decision is None:
@@ -266,7 +272,7 @@ class Backtester:
         if not self.config.execution.btc_vol_guard_enabled:
             self._btc_guard_cache[timestamp] = False
             return False
-        closed = self.bundle.btc_5m.closed_until(timestamp)
+        closed = self.bundle.btc_5m.last_n_closed(timestamp, 36)
         triggered = False
         cooldown = timedelta(seconds=self.config.execution.btc_vol_cooldown_seconds)
         for index in range(max(11, len(closed) - 24), len(closed)):
@@ -287,23 +293,39 @@ class Backtester:
 
     def _btc_confirm(self, runtime: BotRuntime, symbol: str, timestamp: datetime, raw_side: Side) -> bool:
         data = self.bundle.symbols[symbol]
-        if data.confirm_symbol is None:
+        if data.confirm_symbol is None or data.confirm_1h is None:
             return True
-        confirm_hourly = data.closed_confirm_hourly(timestamp)
-        if not confirm_hourly:
+        end_idx = data.confirm_1h.closed_until_idx(timestamp)
+        if end_idx == 0:
             return True
+        candles = data.confirm_1h.last_n_closed(timestamp, 300)
+        confirm_key = f"confirm:{symbol}"
+        indicators = self._indicator_cache.get(confirm_key)
+        if indicators is None:
+            indicators = precompute_indicators(data.confirm_1h.candles)
+            self._indicator_cache[confirm_key] = indicators
         confirm_decision = evaluate_strategy(
             runtime.config.strategy,
             StrategyContext(
                 symbol=data.confirm_symbol,
-                candles=confirm_hourly,
+                candles=candles,
                 cycle_stats=self.bundle.confirm_cycle_stats_as_of(symbol, timestamp),
                 tp_percent=runtime.config.tp_percent,
+                indicators=indicators,
+                candle_end_idx=end_idx,
             ),
         )
         if confirm_decision is None:
             return False
         return confirm_decision.side is raw_side
+
+    def _get_indicators(self, symbol: str):
+        cached = self._indicator_cache.get(symbol)
+        if cached is not None:
+            return cached
+        indicators = precompute_indicators(self.bundle.symbols[symbol].futures_1h.candles)
+        self._indicator_cache[symbol] = indicators
+        return indicators
 
     def _open_trade(self, runtime: BotRuntime, claim: EntryClaim, end_time: datetime) -> ScheduledTrade | None:
         symbol_data = self.bundle.symbols[claim.symbol]

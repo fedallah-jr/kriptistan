@@ -110,6 +110,21 @@ class StrategyDecision:
     signal_strength: float
 
 
+@dataclass(slots=True)
+class PrecomputedIndicators:
+    closes: list[float]
+    highs: list[float]
+    lows: list[float]
+    ema_20: list[float | None]
+    ema_50: list[float | None]
+    ema_200: list[float | None]
+    rsi_14: list[float | None]
+    atr_14: list[float | None]
+    cumulative_vwap: list[float | None]
+    running_high: list[float]
+    running_low: list[float]
+
+
 @dataclass(slots=True, frozen=True)
 class EntryClaim:
     bot_name: str
@@ -196,6 +211,8 @@ class StrategyContext:
     candles: list[Candle]
     cycle_stats: CycleStats | None
     tp_percent: float
+    indicators: PrecomputedIndicators | None = None
+    candle_end_idx: int | None = None
 
 
 @dataclass(slots=True, frozen=True)

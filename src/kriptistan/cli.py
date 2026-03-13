@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .backtest import Backtester
 from .config import load_config
-from .market_data import MarketDataRepository
+from .market_data import InsufficientMarketDataError, MarketDataRepository
 from .outputs import write_backtest_outputs, write_walk_forward_outputs
 from .walkforward import run_walk_forward
 
@@ -34,7 +34,10 @@ def main() -> None:
     if args.command == "backtest":
         config = load_config(args.config)
         repo = MarketDataRepository(config)
-        bundle = repo.build_bundle(symbols=args.symbols)
+        try:
+            bundle = repo.build_bundle(symbols=args.symbols)
+        except InsufficientMarketDataError as exc:
+            raise SystemExit(str(exc)) from exc
         result = Backtester(config, bundle).run()
         run_dir = write_backtest_outputs(result=result, config_path=args.config)
         print(f"net_profit_pct={result.metrics.net_profit_pct:.2f}")
@@ -45,7 +48,10 @@ def main() -> None:
         config = load_config(args.config)
         repo = MarketDataRepository(config)
         warmup_days = max(config.backtest.warmup_days, config.walk_forward.warmup_days)
-        bundle = repo.build_bundle(symbols=args.symbols, warmup_days=warmup_days)
+        try:
+            bundle = repo.build_bundle(symbols=args.symbols, warmup_days=warmup_days)
+        except InsufficientMarketDataError as exc:
+            raise SystemExit(str(exc)) from exc
         report = run_walk_forward(config, bundle)
         run_dir = write_walk_forward_outputs(report=report, config_path=args.config)
         print(f"windows={len(report.windows)} net_profit_pct={report.aggregate_test_metrics.net_profit_pct:.2f}")

@@ -16,7 +16,7 @@ class BacktestConfig:
     scanner_timeframe: str = "1d"
     entry_delay_seconds: int = 5
     entry_window_seconds: int = 15
-    warmup_days: int = 250
+    warmup_days: int = 365
     starting_balance: float = 1_000.0
     capital_mode: CapitalMode = CapitalMode.PER_BOT
     top_candidates: int = 50
@@ -69,7 +69,7 @@ class WalkForwardConfig:
     train_days: int = 180
     test_days: int = 30
     step_days: int = 30
-    warmup_days: int = 250
+    warmup_days: int = 365
     objective_metric: str = "net_profit_pct"
     max_combinations: int = 64
     bot_grids: tuple[WalkForwardGrid, ...] = ()

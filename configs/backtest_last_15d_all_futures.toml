@@ -5,7 +5,7 @@ signal_timeframe = "1h"
 scanner_timeframe = "1d"
 entry_delay_seconds = 5
 entry_window_seconds = 15
-warmup_days = 250
+warmup_days = 365
 starting_balance = 1000.0
 capital_mode = "per_bot"
 top_candidates = 50
@@ -31,8 +31,148 @@ btc_confirm_entry_enabled = true
 enabled = false
 
 [[bots]]
+name = "balanced"
+strategy = "BALANCED"
+max_open_trades = 3
+leverage = 2
+tp_percent = 1.5
+sl_percent = 1.0
+min_24h_volume = 2000000
+due_date_min = -5.0
+due_date_max = 5.0
+same_ticker_cooldown_hours = 1
+dead_end_max_consecutive_losses = 2
+dead_end_lookback_days = 7
+dead_end_blacklist_days = 3
+fng_enabled = true
+risk_aversion = 1.0
+reverse_mode = false
+fixed_priority = 100
+symbol_whitelist = []
+
+[[bots]]
+name = "scalper"
+strategy = "SCALPER"
+max_open_trades = 3
+leverage = 2
+tp_percent = 1.5
+sl_percent = 1.0
+min_24h_volume = 2000000
+due_date_min = -5.0
+due_date_max = 5.0
+same_ticker_cooldown_hours = 1
+dead_end_max_consecutive_losses = 2
+dead_end_lookback_days = 7
+dead_end_blacklist_days = 3
+fng_enabled = true
+risk_aversion = 1.0
+reverse_mode = false
+fixed_priority = 100
+symbol_whitelist = []
+
+[[bots]]
+name = "sniper"
+strategy = "SNIPER"
+max_open_trades = 3
+leverage = 2
+tp_percent = 1.5
+sl_percent = 1.0
+min_24h_volume = 2000000
+due_date_min = -5.0
+due_date_max = 5.0
+same_ticker_cooldown_hours = 1
+dead_end_max_consecutive_losses = 2
+dead_end_lookback_days = 7
+dead_end_blacklist_days = 3
+fng_enabled = true
+risk_aversion = 1.0
+reverse_mode = false
+fixed_priority = 100
+symbol_whitelist = []
+
+[[bots]]
+name = "bounce"
+strategy = "BOUNCE"
+max_open_trades = 3
+leverage = 2
+tp_percent = 1.5
+sl_percent = 1.0
+min_24h_volume = 2000000
+due_date_min = -5.0
+due_date_max = 5.0
+same_ticker_cooldown_hours = 1
+dead_end_max_consecutive_losses = 2
+dead_end_lookback_days = 7
+dead_end_blacklist_days = 3
+fng_enabled = true
+risk_aversion = 1.0
+reverse_mode = false
+fixed_priority = 100
+symbol_whitelist = []
+
+[[bots]]
+name = "cycle_rev"
+strategy = "CYCLE_REV"
+max_open_trades = 3
+leverage = 2
+tp_percent = 1.5
+sl_percent = 1.0
+min_24h_volume = 2000000
+due_date_min = -5.0
+due_date_max = 5.0
+same_ticker_cooldown_hours = 1
+dead_end_max_consecutive_losses = 2
+dead_end_lookback_days = 7
+dead_end_blacklist_days = 3
+fng_enabled = true
+risk_aversion = 1.0
+reverse_mode = false
+fixed_priority = 100
+symbol_whitelist = []
+
+[[bots]]
 name = "trend_mom"
 strategy = "TREND_MOM"
+max_open_trades = 3
+leverage = 2
+tp_percent = 1.5
+sl_percent = 1.0
+min_24h_volume = 2000000
+due_date_min = -5.0
+due_date_max = 5.0
+same_ticker_cooldown_hours = 1
+dead_end_max_consecutive_losses = 2
+dead_end_lookback_days = 7
+dead_end_blacklist_days = 3
+fng_enabled = true
+risk_aversion = 1.0
+reverse_mode = false
+fixed_priority = 100
+symbol_whitelist = []
+
+[[bots]]
+name = "breakout_retest"
+strategy = "BREAKOUT_RETEST"
+max_open_trades = 3
+leverage = 2
+tp_percent = 1.5
+sl_percent = 1.0
+min_24h_volume = 2000000
+due_date_min = -5.0
+due_date_max = 5.0
+same_ticker_cooldown_hours = 1
+dead_end_max_consecutive_losses = 2
+dead_end_lookback_days = 7
+dead_end_blacklist_days = 3
+fng_enabled = true
+risk_aversion = 1.0
+reverse_mode = false
+fixed_priority = 100
+symbol_whitelist = []
+
+[[bots]]
+name = "pullback_reclaim"
+strategy = "PULLBACK_RECLAIM"
 max_open_trades = 3
 leverage = 2
 tp_percent = 1.5
