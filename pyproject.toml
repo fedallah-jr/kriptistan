@@ -7,7 +7,7 @@ name = "kriptistan"
 version = "0.1.0"
 description = "Futures-first crypto strategy backtester."
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["tqdm>=4,<5"]
 
 [project.scripts]
 kriptistan-backtest = "kriptistan.cli:main"

@@ -39,6 +39,7 @@ class BacktestConfig:
     exact_mode_max_history_days: int = 365
     use_closed_candles_only: bool = True
     use_previous_day_fng: bool = True
+    reverse_mode: bool = False
     scanner_param_sets: tuple[ScannerParamSet, ...] = _DEFAULT_SCANNER_PARAM_SETS
 
     @property
@@ -137,6 +138,7 @@ def load_config(path: str | Path) -> AppConfig:
         exact_mode_max_history_days=backtest_raw.get("exact_mode_max_history_days", 365),
         use_closed_candles_only=backtest_raw.get("use_closed_candles_only", True),
         use_previous_day_fng=backtest_raw.get("use_previous_day_fng", True),
+        reverse_mode=backtest_raw.get("reverse_mode", False),
         scanner_param_sets=scanner_param_sets,
     )
     execution = ExecutionConfig(
@@ -173,6 +175,11 @@ def load_config(path: str | Path) -> AppConfig:
         )
         for item in bots_raw
     )
+    if backtest.reverse_mode and any(bot.reverse_mode for bot in bots):
+        raise ValueError(
+            "Config mixes global [backtest].reverse_mode=true with per-bot reverse_mode=true. "
+            "Choose either the global switch or per-bot switches."
+        )
     grids = tuple(
         WalkForwardGrid(
             bot_name=item["bot_name"],

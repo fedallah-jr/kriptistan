@@ -10,6 +10,7 @@ from .config import AppConfig, ScannerParamSet
 from .data_binance import BinanceFuturesPublicClient, BinanceSpotPublicClient
 from .data_fng import FearGreedClient, FearGreedPoint
 from .models import AggTrade, Candle, CycleStats, ExchangeSymbol
+from .progress import ProgressPrinter
 
 # EMA-200 is the largest indicator period; drives hourly warmup requirement.
 _MAX_INDICATOR_PERIOD = 200
@@ -221,12 +222,14 @@ class MarketDataRepository:
     _futures_symbols: dict[str, ExchangeSymbol] | None = field(init=False, default=None, repr=False)
     _spot_symbols: dict[str, ExchangeSymbol] | None = field(init=False, default=None, repr=False)
     _agg_cache: dict[tuple[str, datetime], list[AggTrade]] = field(init=False, default_factory=dict, repr=False)
+    _progress: ProgressPrinter = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         cache = JsonCache(self.cache_dir)
         self.futures = BinanceFuturesPublicClient(cache)
         self.spot = BinanceSpotPublicClient(cache)
         self.fng = FearGreedClient(cache)
+        self._progress = ProgressPrinter("market-data", 0)
 
     def list_futures_symbols(self) -> dict[str, ExchangeSymbol]:
         if self._futures_symbols is None:
@@ -247,6 +250,7 @@ class MarketDataRepository:
     def build_bundle(self, symbols: list[str] | None = None, *, warmup_days: int | None = None) -> MarketDataBundle:
         futures_symbols = self.list_futures_symbols()
         selected = symbols or sorted(futures_symbols)
+        self._progress = ProgressPrinter("market-data", len(selected))
         warmup = warmup_days if warmup_days is not None else self.config.backtest.warmup_days
         scanner_warmup = self.config.backtest.scanner_warmup_days
         start = self.config.backtest.start
@@ -267,30 +271,35 @@ class MarketDataRepository:
         symbol_data: dict[str, SymbolMarketData] = {}
         skipped_symbols: list[tuple[str, int]] = []
 
-        for symbol in selected:
-            meta = futures_symbols[symbol]
-            futures_1h = CandleSeries(self.fetch_futures_klines(symbol=symbol, interval="1h", start=hourly_warmup_start, end=end))
-            hourly_count = futures_1h.closed_until_idx(start)
-            if hourly_count < _MAX_INDICATOR_PERIOD:
-                skipped_symbols.append((symbol, hourly_count))
-                continue
-            futures_1d = CandleSeries(self.fetch_futures_klines(symbol=symbol, interval="1d", start=daily_warmup_start, end=end))
-            confirm_symbol = f"{meta.base_asset}BTC"
-            confirm_1d = None
-            confirm_1h = None
-            if confirm_symbol in spot_symbols:
-                confirm_1d = CandleSeries(self.fetch_spot_klines(symbol=confirm_symbol, interval="1d", start=daily_warmup_start, end=end))
-                if btc_confirm:
-                    confirm_1h = CandleSeries(self.fetch_spot_klines(symbol=confirm_symbol, interval="1h", start=hourly_warmup_start, end=end))
-            symbol_data[symbol] = SymbolMarketData(
-                symbol=symbol,
-                exchange_symbol=meta,
-                futures_1d=futures_1d,
-                futures_1h=futures_1h,
-                confirm_symbol=confirm_symbol if confirm_1d is not None else None,
-                confirm_1d=confirm_1d,
-                confirm_1h=confirm_1h,
-            )
+        try:
+            for index, symbol in enumerate(selected, start=1):
+                meta = futures_symbols[symbol]
+                futures_1h = CandleSeries(self.fetch_futures_klines(symbol=symbol, interval="1h", start=hourly_warmup_start, end=end))
+                hourly_count = futures_1h.closed_until_idx(start)
+                if hourly_count < _MAX_INDICATOR_PERIOD:
+                    skipped_symbols.append((symbol, hourly_count))
+                    self._progress.update(index)
+                    continue
+                futures_1d = CandleSeries(self.fetch_futures_klines(symbol=symbol, interval="1d", start=daily_warmup_start, end=end))
+                confirm_symbol = f"{meta.base_asset}BTC"
+                confirm_1d = None
+                confirm_1h = None
+                if confirm_symbol in spot_symbols:
+                    confirm_1d = CandleSeries(self.fetch_spot_klines(symbol=confirm_symbol, interval="1d", start=daily_warmup_start, end=end))
+                    if btc_confirm:
+                        confirm_1h = CandleSeries(self.fetch_spot_klines(symbol=confirm_symbol, interval="1h", start=hourly_warmup_start, end=end))
+                symbol_data[symbol] = SymbolMarketData(
+                    symbol=symbol,
+                    exchange_symbol=meta,
+                    futures_1d=futures_1d,
+                    futures_1h=futures_1h,
+                    confirm_symbol=confirm_symbol if confirm_1d is not None else None,
+                    confirm_1d=confirm_1d,
+                    confirm_1h=confirm_1h,
+                )
+                self._progress.update(index)
+        finally:
+            self._progress.close()
 
         _report_skipped_hourly_warmup(start=start, short_symbols=skipped_symbols)
         if not symbol_data:

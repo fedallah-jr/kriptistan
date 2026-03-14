@@ -15,6 +15,7 @@ exact_mode = true
 exact_mode_max_history_days = 365
 use_closed_candles_only = true
 use_previous_day_fng = true
+reverse_mode = true
 
 [execution]
 taker_fee_rate = 0.0005
@@ -50,7 +51,6 @@ dead_end_lookback_days = 7
 dead_end_blacklist_days = 3
 fng_enabled = false
 risk_aversion = 1.0
-reverse_mode = false
 fixed_priority = 100
 symbol_whitelist = []
 
@@ -70,7 +70,6 @@ dead_end_lookback_days = 7
 dead_end_blacklist_days = 3
 fng_enabled = false
 risk_aversion = 1.0
-reverse_mode = false
 fixed_priority = 100
 symbol_whitelist = []
 
@@ -90,7 +89,6 @@ dead_end_lookback_days = 7
 dead_end_blacklist_days = 3
 fng_enabled = false
 risk_aversion = 1.0
-reverse_mode = false
 fixed_priority = 100
 symbol_whitelist = []
 
@@ -110,7 +108,6 @@ dead_end_lookback_days = 7
 dead_end_blacklist_days = 3
 fng_enabled = false
 risk_aversion = 1.0
-reverse_mode = false
 fixed_priority = 100
 symbol_whitelist = []
 
@@ -130,7 +127,6 @@ dead_end_lookback_days = 7
 dead_end_blacklist_days = 3
 fng_enabled = false
 risk_aversion = 1.0
-reverse_mode = false
 fixed_priority = 100
 symbol_whitelist = []
 
@@ -150,7 +146,6 @@ dead_end_lookback_days = 7
 dead_end_blacklist_days = 3
 fng_enabled = false
 risk_aversion = 1.0
-reverse_mode = false
 fixed_priority = 100
 symbol_whitelist = []
 
@@ -170,7 +165,6 @@ dead_end_lookback_days = 7
 dead_end_blacklist_days = 3
 fng_enabled = false
 risk_aversion = 1.0
-reverse_mode = false
 fixed_priority = 100
 symbol_whitelist = []
 
@@ -190,6 +184,5 @@ dead_end_lookback_days = 7
 dead_end_blacklist_days = 3
 fng_enabled = false
 risk_aversion = 1.0
-reverse_mode = false
 fixed_priority = 100
 symbol_whitelist = []

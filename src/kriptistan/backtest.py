@@ -3,12 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
-from .config import AppConfig, BotConfig
+from .config import AppConfig, BacktestConfig, BotConfig
 from .execution import approximate_entry_price_band, compute_effective_tp_sl, compute_pnl_percent, resolve_exit_hierarchical, select_entry_price_band
 from .gates import anti_repetition_guard, btc_vol_guard_triggered, chase_filter_passes, dead_end_blacklisted, due_date_in_range, resolve_collisions, symbol_on_cooldown
 from .indicators import precompute_indicators
 from .market_data import MarketDataBundle
 from .models import Candidate, CollisionPolicy, CycleStats, EntryClaim, ExitReason, Position, ScheduledTrade, Side, StrategyContext
+from .progress import ProgressPrinter
 from .reports import BotLedger, build_portfolio_result
 from .sizing import compute_fill_result
 from .strategies import evaluate_strategy
@@ -95,112 +96,126 @@ class Backtester:
 
         runtime_by_name: dict[str, BotRuntime] = {r.config.name: r for r in runtimes}
         timestamps = self.bundle.hourly_timestamps(start=start_time, end=end_time)
-        for timestamp in timestamps:
-            self._settle_due_trades(runtimes, timestamp)
-            open_symbols = {
-                trade.position.symbol
-                for runtime in runtimes
-                for trade in runtime.open_trades
-            }
-            claims: list[EntryClaim] = []
-            btc_guard_active = self._btc_guard_active(timestamp)
-            base_candidates = self._scanner_candidates(timestamp)
-            idx_cache: dict[str, int] = {}
-            slice_cache: dict[str, list] = {}
-            for runtime in runtimes:
-                if runtime.available_slots <= 0:
-                    runtime.ledger.equity_points.append(runtime.ledger.current_balance)
-                    continue
-                for candidate in self._filter_candidates(runtime, base_candidates, timestamp, open_symbols):
-                    symbol_data = self.bundle.symbols[candidate.symbol]
-                    indicators = self._get_indicators(candidate.symbol)
-                    if candidate.symbol not in idx_cache:
-                        idx_cache[candidate.symbol] = symbol_data.futures_1h.closed_until_idx(timestamp)
-                        slice_cache[candidate.symbol] = symbol_data.futures_1h.last_n_closed(timestamp, 300)
-                    end_idx = idx_cache[candidate.symbol]
-                    candles = slice_cache[candidate.symbol]
-                    decision = evaluate_strategy(
-                        runtime.config.strategy,
-                        StrategyContext(
-                            symbol=candidate.symbol,
-                            candles=candles,
-                            cycle_stats=candidate.cycle_stats,
-                            tp_percent=runtime.config.tp_percent,
-                            indicators=indicators,
-                            candle_end_idx=end_idx,
-                        ),
-                    )
-                    if decision is None:
+        total_timestamps = len(timestamps)
+        progress = ProgressPrinter("backtest", total_timestamps)
+        try:
+            for index, timestamp in enumerate(timestamps, start=1):
+                self._settle_due_trades(runtimes, timestamp)
+                open_symbols = {
+                    trade.position.symbol
+                    for runtime in runtimes
+                    for trade in runtime.open_trades
+                }
+                claims: list[EntryClaim] = []
+                btc_guard_active = self._btc_guard_active(timestamp)
+                base_candidates = self._scanner_candidates(timestamp)
+                idx_cache: dict[str, int] = {}
+                slice_cache: dict[str, list] = {}
+                for runtime in runtimes:
+                    effective_tp_percent, _ = _effective_tp_sl(self.config.backtest, runtime.config)
+                    if runtime.available_slots <= 0:
+                        runtime.ledger.equity_points.append(runtime.ledger.current_balance)
                         continue
-                    latest = candles[-1]
-                    raw_side = decision.side
-                    if btc_guard_active:
-                        runtime.ledger.reject("btc_vol_guard")
-                        continue
-                    if self.config.execution.chase_filter_enabled and not chase_filter_passes(
-                        raw_side,
-                        latest,
-                        tp_percent=runtime.config.tp_percent,
-                        close_position_limit=self.config.execution.chase_close_pos,
-                        range_multiple_tp=self.config.execution.chase_range_mult_tp,
-                    ):
-                        runtime.ledger.reject("chase_filter")
-                        continue
-                    if self.config.execution.btc_confirm_entry_enabled and not self._btc_confirm(runtime, candidate.symbol, timestamp, raw_side):
-                        runtime.ledger.reject("btc_confirm")
-                        continue
-                    actual_side, _, _ = _effective_side_and_risk(runtime.config, raw_side)
-                    claims.append(
-                        EntryClaim(
-                            bot_name=runtime.config.name,
-                            strategy=runtime.config.strategy,
-                            symbol=candidate.symbol,
-                            side=actual_side,
-                            signal_time=timestamp,
-                            reason=decision.reason,
-                            technical_score=decision.technical_score,
-                            signal_strength=decision.signal_strength,
-                            fixed_priority=runtime.config.fixed_priority,
+                    for candidate in self._filter_candidates(runtime, base_candidates, timestamp, open_symbols):
+                        symbol_data = self.bundle.symbols[candidate.symbol]
+                        indicators = self._get_indicators(candidate.symbol)
+                        if candidate.symbol not in idx_cache:
+                            idx_cache[candidate.symbol] = symbol_data.futures_1h.closed_until_idx(timestamp)
+                            slice_cache[candidate.symbol] = symbol_data.futures_1h.last_n_closed(timestamp, 300)
+                        end_idx = idx_cache[candidate.symbol]
+                        candles = slice_cache[candidate.symbol]
+                        decision = evaluate_strategy(
+                            runtime.config.strategy,
+                            StrategyContext(
+                                symbol=candidate.symbol,
+                                candles=candles,
+                                cycle_stats=candidate.cycle_stats,
+                                tp_percent=effective_tp_percent,
+                                indicators=indicators,
+                                candle_end_idx=end_idx,
+                            ),
                         )
-                    )
-                runtime.ledger.equity_points.append(runtime.ledger.current_balance)
+                        if decision is None:
+                            continue
+                        latest = candles[-1]
+                        raw_side = decision.side
+                        if btc_guard_active:
+                            runtime.ledger.reject("btc_vol_guard")
+                            continue
+                        if self.config.execution.chase_filter_enabled and not chase_filter_passes(
+                            _effective_side(self.config.backtest, runtime.config, raw_side),
+                            latest,
+                            tp_percent=effective_tp_percent,
+                            close_position_limit=self.config.execution.chase_close_pos,
+                            range_multiple_tp=self.config.execution.chase_range_mult_tp,
+                        ):
+                            runtime.ledger.reject("chase_filter")
+                            continue
+                        actual_side = _effective_side(self.config.backtest, runtime.config, raw_side)
+                        if self.config.execution.btc_confirm_entry_enabled and not self._btc_confirm(
+                            runtime,
+                            candidate.symbol,
+                            timestamp,
+                            actual_side,
+                            effective_tp_percent,
+                        ):
+                            runtime.ledger.reject("btc_confirm")
+                            continue
+                        claims.append(
+                            EntryClaim(
+                                bot_name=runtime.config.name,
+                                strategy=runtime.config.strategy,
+                                symbol=candidate.symbol,
+                                side=actual_side,
+                                signal_time=timestamp,
+                                reason=decision.reason,
+                                technical_score=decision.technical_score,
+                                signal_strength=decision.signal_strength,
+                                fixed_priority=runtime.config.fixed_priority,
+                            )
+                        )
+                    runtime.ledger.equity_points.append(runtime.ledger.current_balance)
 
-            winners, rejections = resolve_collisions(claims, policy=policy, timestamp=timestamp, shuffle_seed=seed)
-            for rejected in rejections:
-                runtime = runtime_by_name[rejected.claim.bot_name]
-                runtime.ledger.reject(rejected.reason)
+                winners, rejections = resolve_collisions(claims, policy=policy, timestamp=timestamp, shuffle_seed=seed)
+                for rejected in rejections:
+                    runtime = runtime_by_name[rejected.claim.bot_name]
+                    runtime.ledger.reject(rejected.reason)
 
-            selected_by_bot: dict[str, list[EntryClaim]] = {}
-            for claim in winners:
-                selected_by_bot.setdefault(claim.bot_name, []).append(claim)
-            accepted_claims: list[EntryClaim] = []
-            for bot_name, bot_claims in selected_by_bot.items():
-                runtime = runtime_by_name[bot_name]
-                ranked = sorted(bot_claims, key=lambda item: (-item.signal_strength, -item.technical_score, item.symbol))
-                accepted = ranked[: runtime.available_slots]
-                for rejected in ranked[runtime.available_slots :]:
-                    runtime.ledger.reject("bot_capacity")
-                accepted_claims.extend(accepted)
+                selected_by_bot: dict[str, list[EntryClaim]] = {}
+                for claim in winners:
+                    selected_by_bot.setdefault(claim.bot_name, []).append(claim)
+                accepted_claims: list[EntryClaim] = []
+                for bot_name, bot_claims in selected_by_bot.items():
+                    runtime = runtime_by_name[bot_name]
+                    ranked = sorted(bot_claims, key=lambda item: (-item.signal_strength, -item.technical_score, item.symbol))
+                    accepted = ranked[: runtime.available_slots]
+                    for rejected in ranked[runtime.available_slots :]:
+                        runtime.ledger.reject("bot_capacity")
+                    accepted_claims.extend(accepted)
 
-            accepted_claims = sorted(
-                accepted_claims,
-                key=lambda item: (-item.signal_strength, -item.technical_score, -item.fixed_priority, item.bot_name, item.symbol),
-            )
-            for claim in accepted_claims:
-                runtime = runtime_by_name[claim.bot_name]
-                trade = self._open_trade(runtime, claim, end_time)
-                if trade is None:
-                    continue
-                runtime.open_trades.append(trade)
-                open_symbols.add(trade.position.symbol)
+                accepted_claims = sorted(
+                    accepted_claims,
+                    key=lambda item: (-item.signal_strength, -item.technical_score, -item.fixed_priority, item.bot_name, item.symbol),
+                )
+                for claim in accepted_claims:
+                    runtime = runtime_by_name[claim.bot_name]
+                    trade = self._open_trade(runtime, claim, end_time)
+                    if trade is None:
+                        continue
+                    runtime.open_trades.append(trade)
+                    open_symbols.add(trade.position.symbol)
+                progress.update(index)
+        finally:
+            progress.close()
 
         self._settle_due_trades(runtimes, end_time + timedelta(days=3650))
-        return build_portfolio_result(
+        result = build_portfolio_result(
             start=start_time,
             end=end_time,
             ledgers=ledgers,
             collision_policy=policy,
         )
+        return result
 
     def _scanner_candidates(self, timestamp: datetime) -> list[Candidate]:
         day_candle = next(iter(self.bundle.symbols.values())).closed_daily(timestamp)
@@ -298,7 +313,14 @@ class Backtester:
         self._btc_guard_cache[timestamp] = triggered
         return triggered
 
-    def _btc_confirm(self, runtime: BotRuntime, symbol: str, timestamp: datetime, raw_side: Side) -> bool:
+    def _btc_confirm(
+        self,
+        runtime: BotRuntime,
+        symbol: str,
+        timestamp: datetime,
+        side: Side,
+        tp_percent: float,
+    ) -> bool:
         data = self.bundle.symbols[symbol]
         if data.confirm_symbol is None or data.confirm_1h is None:
             return True
@@ -317,14 +339,14 @@ class Backtester:
                 symbol=data.confirm_symbol,
                 candles=candles,
                 cycle_stats=self.bundle.confirm_cycle_stats_as_of(symbol, timestamp),
-                tp_percent=runtime.config.tp_percent,
+                tp_percent=tp_percent,
                 indicators=indicators,
                 candle_end_idx=end_idx,
             ),
         )
         if confirm_decision is None:
             return False
-        return confirm_decision.side is raw_side
+        return confirm_decision.side is side
 
     def _get_indicators(self, symbol: str):
         cached = self._indicator_cache.get(symbol)
@@ -374,7 +396,7 @@ class Backtester:
             runtime.ledger.reject("sizing_failed")
             return None
 
-        tp_percent, sl_percent = _effective_tp_sl(runtime.config)
+        tp_percent, sl_percent = _effective_tp_sl(self.config.backtest, runtime.config)
         fng_value = self.bundle.latest_fng_value(as_of=claim.signal_time, use_previous_day=self.config.backtest.use_previous_day_fng) if runtime.config.fng_enabled else None
         adjusted_tp, adjusted_sl, tp_price, sl_price = compute_effective_tp_sl(
             entry_price=entry_band.base_price,
@@ -452,14 +474,18 @@ def apply_bot_overrides(bots: tuple[BotConfig, ...], overrides: dict[str, dict[s
     return tuple(updated)
 
 
-def _effective_side_and_risk(bot: BotConfig, side: Side) -> tuple[Side, float, float]:
-    if not bot.reverse_mode:
-        return side, bot.tp_percent, bot.sl_percent
+def _inverted(backtest: BacktestConfig, bot: BotConfig) -> bool:
+    return backtest.reverse_mode or bot.reverse_mode
+
+
+def _effective_side(backtest: BacktestConfig, bot: BotConfig, side: Side) -> Side:
+    if not _inverted(backtest, bot):
+        return side
     reversed_side = Side.SHORT if side is Side.LONG else Side.LONG
-    return reversed_side, bot.sl_percent, bot.tp_percent
+    return reversed_side
 
 
-def _effective_tp_sl(bot: BotConfig) -> tuple[float, float]:
-    if not bot.reverse_mode:
+def _effective_tp_sl(backtest: BacktestConfig, bot: BotConfig) -> tuple[float, float]:
+    if not _inverted(backtest, bot):
         return bot.tp_percent, bot.sl_percent
     return bot.sl_percent, bot.tp_percent
