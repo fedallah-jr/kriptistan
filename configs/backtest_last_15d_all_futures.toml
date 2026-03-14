@@ -33,7 +33,7 @@ enabled = false
 [[bots]]
 name = "balanced"
 strategy = "BALANCED"
-max_open_trades = 3
+max_open_trades = 1
 leverage = 2
 tp_percent = 1.5
 sl_percent = 1.0
@@ -53,7 +53,7 @@ symbol_whitelist = []
 [[bots]]
 name = "scalper"
 strategy = "SCALPER"
-max_open_trades = 3
+max_open_trades = 1
 leverage = 2
 tp_percent = 1.5
 sl_percent = 1.0
@@ -73,7 +73,7 @@ symbol_whitelist = []
 [[bots]]
 name = "sniper"
 strategy = "SNIPER"
-max_open_trades = 3
+max_open_trades = 1
 leverage = 2
 tp_percent = 1.5
 sl_percent = 1.0
@@ -93,7 +93,7 @@ symbol_whitelist = []
 [[bots]]
 name = "bounce"
 strategy = "BOUNCE"
-max_open_trades = 3
+max_open_trades = 1
 leverage = 2
 tp_percent = 1.5
 sl_percent = 1.0
@@ -113,7 +113,7 @@ symbol_whitelist = []
 [[bots]]
 name = "cycle_rev"
 strategy = "CYCLE_REV"
-max_open_trades = 3
+max_open_trades = 1
 leverage = 2
 tp_percent = 1.5
 sl_percent = 1.0
@@ -133,7 +133,7 @@ symbol_whitelist = []
 [[bots]]
 name = "trend_mom"
 strategy = "TREND_MOM"
-max_open_trades = 3
+max_open_trades = 1
 leverage = 2
 tp_percent = 1.5
 sl_percent = 1.0
@@ -153,7 +153,7 @@ symbol_whitelist = []
 [[bots]]
 name = "breakout_retest"
 strategy = "BREAKOUT_RETEST"
-max_open_trades = 3
+max_open_trades = 1
 leverage = 2
 tp_percent = 1.5
 sl_percent = 1.0
@@ -173,7 +173,7 @@ symbol_whitelist = []
 [[bots]]
 name = "pullback_reclaim"
 strategy = "PULLBACK_RECLAIM"
-max_open_trades = 3
+max_open_trades = 1
 leverage = 2
 tp_percent = 1.5
 sl_percent = 1.0

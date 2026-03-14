@@ -259,6 +259,7 @@ class Backtester:
                 max_consecutive_losses=runtime.config.dead_end_max_consecutive_losses,
                 lookback_days=runtime.config.dead_end_lookback_days,
                 blacklist_days=runtime.config.dead_end_blacklist_days,
+                all_close_times=runtime.closed_times_by_symbol.get(symbol, []),
             ):
                 runtime.ledger.reject("dead_end_blacklist")
                 continue

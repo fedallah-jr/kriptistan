@@ -36,6 +36,16 @@ class RateLimiter:
                 return
             time.sleep(0.1)
 
+    def sync_from_server(self, used_weight: int) -> None:
+        """Sync local token count from Binance ``X-MBX-USED-WEIGHT-1m`` header.
+
+        Only adjusts *downward* so the client never races ahead of the server.
+        """
+        self._refill()
+        server_remaining = max(0.0, float(self.limit_per_minute) - used_weight)
+        if server_remaining < self._tokens:
+            self._tokens = server_remaining
+
     def _refill(self) -> None:
         now = time.monotonic()
         elapsed = now - self._updated_at
@@ -212,9 +222,11 @@ def _get_json_with_backoff(
         try:
             with urlopen(url) as response:
                 payload = json.loads(response.read())
+                _sync_rate_limiter(rate_limiter, response.headers)
         except HTTPError as exc:
             if exc.code not in _RETRYABLE_HTTP_STATUS_CODES:
                 raise
+            _sync_rate_limiter(rate_limiter, exc.headers)
             delay = _retry_delay_seconds(exc, fallback_seconds=next_delay)
             _log_rate_limit_wait(path=path, params=params, status_code=exc.code, delay_seconds=delay, attempt=attempt)
             time.sleep(delay)
@@ -223,6 +235,17 @@ def _get_json_with_backoff(
             continue
         cache.set("binance", cache_key, payload)
         return payload
+
+
+def _sync_rate_limiter(rate_limiter: RateLimiter, headers: Any) -> None:
+    if headers is None:
+        return
+    used = headers.get("X-MBX-USED-WEIGHT-1m")
+    if used is not None:
+        try:
+            rate_limiter.sync_from_server(int(used))
+        except (ValueError, TypeError):
+            pass
 
 
 def _retry_delay_seconds(exc: HTTPError, *, fallback_seconds: float) -> float:

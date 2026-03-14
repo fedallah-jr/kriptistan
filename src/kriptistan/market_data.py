@@ -101,7 +101,13 @@ class MarketDataBundle:
         return [candle.close_time for candle in candles if start <= candle.close_time <= end]
 
     def cycle_stats_as_of(self, symbol: str, as_of: datetime) -> CycleStats | None:
-        daily = self.symbols[symbol].closed_daily(as_of)
+        data = self.symbols[symbol]
+        # Use ALT/BTC daily candles for cycle detection (filters out BTC noise).
+        # Fall back to ALT/USDT if the BTC pair is not available.
+        if data.confirm_1d is not None:
+            daily = data.closed_confirm_daily(as_of)
+        else:
+            daily = data.closed_daily(as_of)
         if not daily:
             return None
         key = (symbol, daily[-1].close_time)
@@ -216,7 +222,10 @@ class MarketDataRepository:
         hourly_warmup_start = start - timedelta(days=hourly_warmup_days)
         btc_5m_warmup_start = start - timedelta(days=1)
 
-        spot_symbols = self.list_spot_symbols() if self.config.execution.btc_confirm_entry_enabled else {}
+        # Always load spot symbol list — ALT/BTC daily candles are needed for
+        # cycle detection regardless of whether BTC confirm entry is enabled.
+        spot_symbols = self.list_spot_symbols()
+        btc_confirm = self.config.execution.btc_confirm_entry_enabled
         symbol_data: dict[str, SymbolMarketData] = {}
         skipped_symbols: list[tuple[str, int]] = []
 
@@ -233,13 +242,14 @@ class MarketDataRepository:
             confirm_1h = None
             if confirm_symbol in spot_symbols:
                 confirm_1d = CandleSeries(self.fetch_spot_klines(symbol=confirm_symbol, interval="1d", start=daily_warmup_start, end=end))
-                confirm_1h = CandleSeries(self.fetch_spot_klines(symbol=confirm_symbol, interval="1h", start=hourly_warmup_start, end=end))
+                if btc_confirm:
+                    confirm_1h = CandleSeries(self.fetch_spot_klines(symbol=confirm_symbol, interval="1h", start=hourly_warmup_start, end=end))
             symbol_data[symbol] = SymbolMarketData(
                 symbol=symbol,
                 exchange_symbol=meta,
                 futures_1d=futures_1d,
                 futures_1h=futures_1h,
-                confirm_symbol=confirm_symbol if confirm_1h is not None else None,
+                confirm_symbol=confirm_symbol if confirm_1d is not None else None,
                 confirm_1d=confirm_1d,
                 confirm_1h=confirm_1h,
             )
@@ -296,13 +306,17 @@ class MarketDataRepository:
         return _dedupe_candles(results)
 
     def fetch_agg_trades(self, *, symbol: str, start: datetime, end: datetime) -> list[AggTrade]:
+        results: list[AggTrade] = []
         hour_start = start.replace(minute=0, second=0, microsecond=0)
-        cached = self._agg_cache.get((symbol, hour_start))
-        if cached is None:
-            hour_end = min(hour_start + timedelta(hours=1), end)
-            cached = self._fetch_hour_agg_trades(symbol=symbol, start=hour_start, end=hour_end)
-            self._agg_cache[(symbol, hour_start)] = cached
-        return [trade for trade in cached if start <= trade.timestamp <= end]
+        while hour_start < end:
+            hour_end = hour_start + timedelta(hours=1)
+            cached = self._agg_cache.get((symbol, hour_start))
+            if cached is None:
+                cached = self._fetch_hour_agg_trades(symbol=symbol, start=hour_start, end=hour_end)
+                self._agg_cache[(symbol, hour_start)] = cached
+            results.extend(cached)
+            hour_start = hour_end
+        return [trade for trade in results if start <= trade.timestamp <= end]
 
     def _fetch_hour_agg_trades(self, *, symbol: str, start: datetime, end: datetime) -> list[AggTrade]:
         cursor = start

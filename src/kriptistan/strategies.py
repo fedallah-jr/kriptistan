@@ -174,7 +174,7 @@ def breakout_retest(context: StrategyContext) -> StrategyDecision | None:
     recent_breakout_closes = [candle.close for candle in context.candles[-6:-1]]
     proximity = abs((latest.close - breakout_level) / breakout_level) * 100 if breakout_level else float("inf")
     score = technical_score(context)
-    if recent_breakout_closes and all(value > breakout_level for value in recent_breakout_closes) and proximity <= 0.6 and latest.is_bullish:
+    if recent_breakout_closes and any(value > breakout_level for value in recent_breakout_closes) and proximity <= 0.6 and latest.is_bullish:
         return StrategyDecision(Side.LONG, "Breakout Retest Long", score, 1 / (1 + proximity))
     return None
 

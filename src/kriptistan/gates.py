@@ -69,6 +69,7 @@ def dead_end_blacklisted(
     max_consecutive_losses: int,
     lookback_days: int,
     blacklist_days: int,
+    all_close_times: list[datetime],
 ) -> bool:
     if len(recent_loss_times) < max_consecutive_losses:
         return False
@@ -76,8 +77,19 @@ def dead_end_blacklisted(
     relevant = [value for value in recent_loss_times if value >= lookback_cutoff]
     if len(relevant) < max_consecutive_losses:
         return False
-    latest_loss = max(relevant)
-    return latest_loss + timedelta(days=blacklist_days) >= now
+    loss_set = set(relevant)
+    recent_closes = sorted(
+        (t for t in all_close_times if t >= lookback_cutoff), reverse=True,
+    )
+    streak = 0
+    for t in recent_closes:
+        if t in loss_set:
+            streak += 1
+        else:
+            break
+    if streak < max_consecutive_losses:
+        return False
+    return recent_closes[0] + timedelta(days=blacklist_days) >= now
 
 
 def anti_repetition_guard(symbol: str, recent_symbols: list[str], *, lookback: int = 4) -> bool:
