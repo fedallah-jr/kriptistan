@@ -124,6 +124,46 @@ def resolve_exit_hierarchical(
     day_candles: list[Candle] | None,
     agg_trade_loader: AggTradeLoader,
 ) -> ExitResolution:
+    first_hour_hit = resolve_first_hour_exit(
+        position,
+        minute_candles=minute_candles,
+        agg_trade_loader=agg_trade_loader,
+    )
+    if first_hour_hit is not None:
+        return first_hour_hit
+
+    minute_open_times = [c.open_time for c in minute_candles]
+    first_hour_end = _first_hour_end(position.entry_time)
+    later_hours = [candle for candle in hour_candles if candle.open_time >= first_hour_end]
+    for candle in later_hours:
+        hour_hit = resolve_hour_candle_exit(
+            position,
+            hour_candle=candle,
+            minute_candles_loader=lambda candle=candle: _slice_by_open_time(
+                minute_candles,
+                minute_open_times,
+                candle.open_time,
+                candle.close_time,
+            ),
+            agg_trade_loader=agg_trade_loader,
+        )
+        if hour_hit is not None:
+            return hour_hit
+
+    return ExitResolution(
+        reason=ExitReason.OPEN,
+        exit_time=hour_candles[-1].close_time if hour_candles else position.entry_time,
+        exit_price=hour_candles[-1].close if hour_candles else position.entry_price,
+        resolution_level=ResolutionLevel.HOUR,
+    )
+
+
+def resolve_first_hour_exit(
+    position: Position,
+    *,
+    minute_candles: list[Candle],
+    agg_trade_loader: AggTradeLoader,
+) -> ExitResolution | None:
     minute_open_times = [c.open_time for c in minute_candles]
 
     entry_minute_start = position.entry_time.replace(second=0, microsecond=0)
@@ -142,9 +182,9 @@ def resolve_exit_hierarchical(
     # Entry can happen a few seconds after the hour boundary. After protecting
     # that first partial minute with exact trades, the simulator resolves exits
     # hour-first to match its hourly decision cadence.
-    first_hour_end = position.entry_time.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    first_hour_end = _first_hour_end(position.entry_time)
     same_hour_minutes = _slice_by_open_time(minute_candles, minute_open_times, entry_minute_end, first_hour_end)
-    same_hour_hit = _resolve_hour_interval(
+    return _resolve_hour_interval(
         candles=same_hour_minutes,
         side=position.side,
         tp_price=position.tp_price,
@@ -152,29 +192,39 @@ def resolve_exit_hierarchical(
         close_time=first_hour_end,
         agg_trade_loader=agg_trade_loader,
     )
-    if same_hour_hit is not None:
-        return same_hour_hit
 
-    later_hours = [candle for candle in hour_candles if candle.open_time >= first_hour_end]
-    hour_hit = _resolve_candles(
-        later_hours,
+
+def resolve_hour_candle_exit(
+    position: Position,
+    *,
+    hour_candle: Candle,
+    minute_candles_loader: Callable[[], list[Candle]],
+    agg_trade_loader: AggTradeLoader,
+) -> ExitResolution | None:
+    outcome = _barrier_outcome(hour_candle, position.side, position.tp_price, position.sl_price)
+    if outcome == ExitReason.OPEN:
+        return None
+    if outcome in (ExitReason.TP, ExitReason.SL):
+        return ExitResolution(
+            outcome,
+            hour_candle.close_time,
+            position.tp_price if outcome is ExitReason.TP else position.sl_price,
+            ResolutionLevel.HOUR,
+        )
+    hour_minutes = minute_candles_loader()
+    nested = _resolve_candles(
+        hour_minutes,
         side=position.side,
         tp_price=position.tp_price,
         sl_price=position.sl_price,
-        resolution_level=ResolutionLevel.HOUR,
+        resolution_level=ResolutionLevel.MINUTE,
         agg_trade_loader=agg_trade_loader,
-        minute_candles=minute_candles,
-        minute_open_times=minute_open_times,
     )
-    if hour_hit is not None:
-        return hour_hit
+    return nested
 
-    return ExitResolution(
-        reason=ExitReason.OPEN,
-        exit_time=hour_candles[-1].close_time if hour_candles else position.entry_time,
-        exit_price=hour_candles[-1].close if hour_candles else position.entry_price,
-        resolution_level=ResolutionLevel.HOUR,
-    )
+
+def _first_hour_end(entry_time: datetime) -> datetime:
+    return entry_time.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
 
 
 def compute_pnl_percent(position: Position, exit_price: float, *, taker_fee_rate: float) -> float:

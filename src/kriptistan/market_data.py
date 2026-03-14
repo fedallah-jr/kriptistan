@@ -61,6 +61,7 @@ class SymbolMarketData:
     confirm_1d: CandleSeries | None = None
     confirm_1h: CandleSeries | None = None
     _futures_1m: CandleSeries | None = None
+    _futures_1m_by_hour: dict[datetime, CandleSeries] = field(default_factory=dict, repr=False)
 
     def closed_daily(self, as_of: datetime) -> list[Candle]:
         return self.futures_1d.closed_until(as_of)
@@ -194,16 +195,32 @@ class MarketDataBundle:
         return result
 
     def minute_candles(self, symbol: str) -> list[Candle]:
+        return self.minute_candles_between(symbol, self.start, self.end)
+
+    def minute_candles_between(self, symbol: str, start: datetime, end: datetime) -> list[Candle]:
+        end = min(end, self.end)
+        if start >= end:
+            return []
         data = self.symbols[symbol]
-        if data._futures_1m is None:
-            candles = self.repo.fetch_futures_klines(
-                symbol=symbol,
-                interval="1m",
-                start=self.start,
-                end=self.end,
-            )
-            data._futures_1m = CandleSeries(candles)
-        return data._futures_1m.candles
+        if data._futures_1m is not None:
+            return data._futures_1m.between_open(start, end)
+        results: list[Candle] = []
+        hour_start = start.replace(minute=0, second=0, microsecond=0)
+        while hour_start < end:
+            hour_end = hour_start + timedelta(hours=1)
+            series = data._futures_1m_by_hour.get(hour_start)
+            if series is None:
+                candles = self.repo.fetch_futures_klines(
+                    symbol=symbol,
+                    interval="1m",
+                    start=hour_start,
+                    end=min(hour_end, self.end),
+                )
+                series = CandleSeries(candles)
+                data._futures_1m_by_hour[hour_start] = series
+            results.extend(series.between_open(max(start, hour_start), min(end, hour_end)))
+            hour_start = hour_end
+        return results
 
     def agg_trade_loader(self, symbol: str):
         def load(start: datetime, end: datetime) -> list[AggTrade]:

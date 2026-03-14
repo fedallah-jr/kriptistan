@@ -4,11 +4,11 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 from .config import AppConfig, BacktestConfig, BotConfig
-from .execution import approximate_entry_price_band, compute_effective_tp_sl, compute_pnl_percent, resolve_exit_hierarchical, select_entry_price_band
+from .execution import approximate_entry_price_band, compute_effective_tp_sl, compute_pnl_percent, resolve_first_hour_exit, resolve_hour_candle_exit, select_entry_price_band
 from .gates import anti_repetition_guard, btc_vol_guard_triggered, chase_filter_passes, dead_end_blacklisted, due_date_in_range, resolve_collisions, symbol_on_cooldown
 from .indicators import precompute_indicators
 from .market_data import MarketDataBundle
-from .models import Candidate, CollisionPolicy, CycleStats, EntryClaim, ExitReason, Position, ScheduledTrade, Side, StrategyContext
+from .models import Candidate, CollisionPolicy, CycleStats, EntryClaim, EntryPriceBand, ExitReason, ExitResolution, Position, ResolutionLevel, ScheduledTrade, Side, StrategyContext
 from .progress import ProgressPrinter
 from .reports import BotLedger, build_portfolio_result
 from .sizing import compute_fill_result
@@ -22,11 +22,20 @@ class AccountState:
 
 
 @dataclass(slots=True)
+class OpenTrade:
+    position: Position
+    entry_band: EntryPriceBand
+    signal_time: datetime
+    use_exact: bool
+    resolved_until: datetime
+
+
+@dataclass(slots=True)
 class BotRuntime:
     config: BotConfig
     ledger: BotLedger
     account: AccountState
-    open_trades: list[ScheduledTrade]
+    open_trades: list[OpenTrade]
     closed_symbols: list[str]
     closed_times_by_symbol: dict[str, list[datetime]]
     sl_times_by_symbol: dict[str, list[datetime]]
@@ -199,7 +208,7 @@ class Backtester:
                 )
                 for claim in accepted_claims:
                     runtime = runtime_by_name[claim.bot_name]
-                    trade = self._open_trade(runtime, claim, end_time)
+                    trade = self._open_trade(runtime, claim)
                     if trade is None:
                         continue
                     runtime.open_trades.append(trade)
@@ -208,7 +217,7 @@ class Backtester:
         finally:
             progress.close()
 
-        self._settle_due_trades(runtimes, end_time + timedelta(days=3650))
+        self._settle_due_trades(runtimes, end_time + timedelta(days=3650), force_close=True)
         result = build_portfolio_result(
             start=start_time,
             end=end_time,
@@ -356,9 +365,8 @@ class Backtester:
         self._indicator_cache[symbol] = indicators
         return indicators
 
-    def _open_trade(self, runtime: BotRuntime, claim: EntryClaim, end_time: datetime) -> ScheduledTrade | None:
+    def _open_trade(self, runtime: BotRuntime, claim: EntryClaim) -> OpenTrade | None:
         symbol_data = self.bundle.symbols[claim.symbol]
-        minute_candles = self.bundle.minute_candles(claim.symbol)
         exact_cutoff = datetime.now(UTC) - timedelta(days=self.config.backtest.exact_mode_max_history_days)
         use_exact = self.config.backtest.exact_mode and claim.signal_time >= exact_cutoff
         try:
@@ -374,6 +382,12 @@ class Backtester:
                     entry_window_seconds=self.config.backtest.entry_window_seconds,
                 )
             else:
+                entry_minute_start = claim.signal_time.replace(second=0, microsecond=0)
+                minute_candles = self.bundle.minute_candles_between(
+                    claim.symbol,
+                    entry_minute_start,
+                    entry_minute_start + timedelta(minutes=2),
+                )
                 entry_band = approximate_entry_price_band(
                     minute_candles,
                     side=claim.side,
@@ -431,39 +445,107 @@ class Backtester:
                 "SLP": f"{adjusted_sl:.3f}",
             },
         )
-        exit_resolution = resolve_exit_hierarchical(
-            position,
-            minute_candles=minute_candles,
-            hour_candles=symbol_data.futures_1h.between_open(position.entry_time.replace(minute=0, second=0, microsecond=0), end_time + timedelta(hours=2)),
-            day_candles=symbol_data.futures_1d.between_open(position.entry_time.replace(hour=0, minute=0, second=0, microsecond=0), end_time + timedelta(days=2)),
-            agg_trade_loader=self.bundle.agg_trade_loader(claim.symbol) if use_exact else (lambda _start, _end: []),
-        )
-        pnl_percent = compute_pnl_percent(position, exit_resolution.exit_price, taker_fee_rate=self.config.execution.taker_fee_rate)
-        return ScheduledTrade(
+        return OpenTrade(
             position=position,
             entry_band=entry_band,
-            exit=exit_resolution,
-            pnl_percent=pnl_percent,
             signal_time=claim.signal_time,
+            use_exact=use_exact,
+            resolved_until=position.entry_time,
         )
 
-    def _settle_due_trades(self, runtimes: list[BotRuntime], timestamp: datetime) -> None:
+    def _settle_due_trades(self, runtimes: list[BotRuntime], timestamp: datetime, *, force_close: bool = False) -> None:
         for runtime in runtimes:
-            remaining: list[ScheduledTrade] = []
+            remaining: list[OpenTrade] = []
             for trade in runtime.open_trades:
-                if trade.exit.exit_time > timestamp:
+                exit_resolution = self._resolve_trade_until(trade, timestamp, force_close=force_close)
+                if exit_resolution is None:
                     remaining.append(trade)
                     continue
-                profit_amount = trade.position.margin_used * (trade.pnl_percent / 100)
+                pnl_percent = compute_pnl_percent(
+                    trade.position,
+                    exit_resolution.exit_price,
+                    taker_fee_rate=self.config.execution.taker_fee_rate,
+                )
+                completed = ScheduledTrade(
+                    position=trade.position,
+                    entry_band=trade.entry_band,
+                    exit=exit_resolution,
+                    pnl_percent=pnl_percent,
+                    signal_time=trade.signal_time,
+                )
+                profit_amount = trade.position.margin_used * (pnl_percent / 100)
                 runtime.account.free_balance += trade.position.margin_used + profit_amount
                 runtime.account.wallet_balance += profit_amount
                 runtime.ledger.current_balance += profit_amount
-                runtime.ledger.trades.append(trade)
+                runtime.ledger.trades.append(completed)
                 runtime.closed_symbols.append(trade.position.symbol)
-                runtime.closed_times_by_symbol.setdefault(trade.position.symbol, []).append(trade.exit.exit_time)
-                if trade.exit.reason is ExitReason.SL:
-                    runtime.sl_times_by_symbol.setdefault(trade.position.symbol, []).append(trade.exit.exit_time)
+                runtime.closed_times_by_symbol.setdefault(trade.position.symbol, []).append(exit_resolution.exit_time)
+                if exit_resolution.reason is ExitReason.SL:
+                    runtime.sl_times_by_symbol.setdefault(trade.position.symbol, []).append(exit_resolution.exit_time)
             runtime.open_trades = remaining
+
+    def _resolve_trade_until(self, trade: OpenTrade, cutoff: datetime, *, force_close: bool = False) -> ExitResolution | None:
+        position = trade.position
+        symbol_data = self.bundle.symbols[position.symbol]
+        agg_trade_loader = self.bundle.agg_trade_loader(position.symbol) if trade.use_exact else _empty_agg_trade_loader
+        first_hour_end = _first_hour_end(position.entry_time)
+        current = trade.resolved_until
+
+        if current <= position.entry_time:
+            same_hour_start = position.entry_time.replace(second=0, microsecond=0)
+            same_hour_end = min(first_hour_end, self.bundle.end)
+            minute_candles = self.bundle.minute_candles_between(position.symbol, same_hour_start, same_hour_end)
+            resolution = resolve_first_hour_exit(
+                position,
+                minute_candles=minute_candles,
+                agg_trade_loader=agg_trade_loader,
+            )
+            if resolution is not None:
+                return resolution
+            trade.resolved_until = first_hour_end
+            current = first_hour_end
+
+        while current < cutoff:
+            hour_candles = symbol_data.futures_1h.between_open(current, current + timedelta(hours=1))
+            if not hour_candles:
+                break
+            hour_candle = hour_candles[0]
+            resolution = resolve_hour_candle_exit(
+                position,
+                hour_candle=hour_candle,
+                minute_candles_loader=lambda start=hour_candle.open_time, end=hour_candle.close_time, symbol=position.symbol: self.bundle.minute_candles_between(
+                    symbol,
+                    start,
+                    end,
+                ),
+                agg_trade_loader=agg_trade_loader,
+            )
+            if resolution is not None:
+                return resolution
+            trade.resolved_until = hour_candle.close_time
+            current = trade.resolved_until
+
+        if force_close:
+            return self._force_close_resolution(position, cutoff)
+        return None
+
+    def _force_close_resolution(self, position: Position, cutoff: datetime) -> ExitResolution:
+        final_as_of = min(cutoff, self.bundle.end)
+        hour_candles = self.bundle.symbols[position.symbol].futures_1h.last_n_closed(final_as_of, 1)
+        if hour_candles:
+            candle = hour_candles[-1]
+            return ExitResolution(
+                reason=ExitReason.OPEN,
+                exit_time=candle.close_time,
+                exit_price=candle.close,
+                resolution_level=ResolutionLevel.HOUR,
+            )
+        return ExitResolution(
+            reason=ExitReason.OPEN,
+            exit_time=position.entry_time,
+            exit_price=position.entry_price,
+            resolution_level=ResolutionLevel.HOUR,
+        )
 
 
 def apply_bot_overrides(bots: tuple[BotConfig, ...], overrides: dict[str, dict[str, object]]) -> tuple[BotConfig, ...]:
@@ -489,3 +571,11 @@ def _effective_tp_sl(backtest: BacktestConfig, bot: BotConfig) -> tuple[float, f
     if not _inverted(backtest, bot):
         return bot.tp_percent, bot.sl_percent
     return bot.sl_percent, bot.tp_percent
+
+
+def _first_hour_end(entry_time: datetime) -> datetime:
+    return entry_time.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+
+
+def _empty_agg_trade_loader(_start: datetime, _end: datetime):
+    return []
