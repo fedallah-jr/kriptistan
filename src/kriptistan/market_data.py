@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from .cache import JsonCache
-from .config import AppConfig
+from .config import AppConfig, ScannerParamSet
 from .data_binance import BinanceFuturesPublicClient, BinanceSpotPublicClient
 from .data_fng import FearGreedClient, FearGreedPoint
 from .models import AggTrade, Candle, CycleStats, ExchangeSymbol
@@ -92,7 +92,7 @@ class MarketDataBundle:
     btc_5m: CandleSeries
     fng_points: list[FearGreedPoint]
     repo: "MarketDataRepository"
-    _cycle_cache: dict[tuple[str, datetime], CycleStats | None] = field(default_factory=dict)
+    _cycle_cache: dict[tuple, CycleStats | None] = field(default_factory=dict)
     _volume_cache: dict[tuple[str, datetime], float] = field(default_factory=dict)
 
     def hourly_timestamps(self, *, start: datetime, end: datetime) -> list[datetime]:
@@ -136,6 +136,43 @@ class MarketDataBundle:
         stats = scan_symbol_cycles(data.confirm_symbol, daily)
         self._cycle_cache[key] = stats
         return stats
+
+    def multi_set_cycle_stats_as_of(
+        self,
+        symbol: str,
+        as_of: datetime,
+        scanner_param_sets: tuple[ScannerParamSet, ...],
+    ) -> CycleStats | None:
+        data = self.symbols[symbol]
+        if data.confirm_1d is not None:
+            daily = data.closed_confirm_daily(as_of)
+        else:
+            daily = data.closed_daily(as_of)
+        if not daily:
+            return None
+        from .cycles import scan_symbol_cycles
+
+        merged: CycleStats | None = None
+        for set_idx, param_set in enumerate(scanner_param_sets):
+            sliced = daily[-param_set.warmup_days:]
+            if len(sliced) < 3:
+                continue
+            cache_key = (symbol, sliced[-1].close_time, set_idx)
+            cached = self._cycle_cache.get(cache_key)
+            if cached is not None or cache_key in self._cycle_cache:
+                stats = cached
+            else:
+                stats = scan_symbol_cycles(
+                    symbol,
+                    sliced,
+                    percent_limit=param_set.percent_limit,
+                    stdev_limit=param_set.stdev_limit,
+                )
+                self._cycle_cache[cache_key] = stats
+            if stats is not None:
+                if merged is None or stats.passes_stdev_filter:
+                    merged = stats  # union: any passing set makes the ticker a candidate
+        return merged
 
     def btc_guard_slice(self, as_of: datetime) -> list[Candle]:
         closed = self.btc_5m.closed_until(as_of)
@@ -211,13 +248,14 @@ class MarketDataRepository:
         futures_symbols = self.list_futures_symbols()
         selected = symbols or sorted(futures_symbols)
         warmup = warmup_days if warmup_days is not None else self.config.backtest.warmup_days
+        scanner_warmup = self.config.backtest.scanner_warmup_days
         start = self.config.backtest.start
         end = self.config.backtest.end
 
         # Per-timeframe warmup: daily needs full history for cycle detection,
         # hourly only needs enough for the largest indicator (EMA-200 = 200 candles),
         # 5m only needs ~36 candles for BTC vol guard.
-        daily_warmup_start = start - timedelta(days=warmup)
+        daily_warmup_start = start - timedelta(days=max(warmup, scanner_warmup))
         hourly_warmup_days = (_MAX_INDICATOR_PERIOD // 24) + 2  # 10 days ≈ 240 candles
         hourly_warmup_start = start - timedelta(days=hourly_warmup_days)
         btc_5m_warmup_start = start - timedelta(days=1)

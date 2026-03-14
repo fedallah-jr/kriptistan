@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable
 from datetime import datetime, timedelta
 
@@ -19,11 +20,7 @@ def select_entry_price_band(
 ) -> EntryPriceBand:
     earliest = signal_time + timedelta(seconds=entry_delay_seconds)
     window_end = signal_time + timedelta(seconds=entry_window_seconds)
-    window = [
-        trade
-        for trade in sorted(trades, key=lambda item: (item.timestamp, item.trade_id))
-        if signal_time <= trade.timestamp <= window_end
-    ]
+    window = [trade for trade in trades if signal_time <= trade.timestamp <= window_end]
     if not window:
         raise ValueError("no aggregate trades available inside the entry window")
     base_trade = next((trade for trade in window if trade.timestamp >= earliest), None)
@@ -54,9 +51,15 @@ def approximate_entry_price_band(
     entry_delay_seconds: int,
     entry_window_seconds: int,
 ) -> EntryPriceBand:
-    minute = next((candle for candle in candles if candle.open_time <= signal_time < candle.close_time), None)
+    open_times = [c.open_time for c in candles]
+    idx = bisect_right(open_times, signal_time) - 1
+    minute = None
+    if 0 <= idx < len(candles) and candles[idx].open_time <= signal_time < candles[idx].close_time:
+        minute = candles[idx]
     if minute is None:
-        minute = next((candle for candle in candles if candle.open_time >= signal_time), None)
+        idx = bisect_left(open_times, signal_time)
+        if idx < len(candles):
+            minute = candles[idx]
     if minute is None:
         raise ValueError("no minute candle available for approximate entry pricing")
     if side is Side.LONG:
@@ -121,6 +124,8 @@ def resolve_exit_hierarchical(
     day_candles: list[Candle] | None,
     agg_trade_loader: AggTradeLoader,
 ) -> ExitResolution:
+    minute_open_times = [c.open_time for c in minute_candles]
+
     entry_minute_start = position.entry_time.replace(second=0, microsecond=0)
     entry_minute_end = entry_minute_start + timedelta(minutes=1)
     entry_trades = agg_trade_loader(position.entry_time, entry_minute_end)
@@ -138,7 +143,7 @@ def resolve_exit_hierarchical(
     # that first partial minute with exact trades, the simulator resolves exits
     # hour-first to match its hourly decision cadence.
     first_hour_end = position.entry_time.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-    same_hour_minutes = [candle for candle in minute_candles if entry_minute_end <= candle.open_time < first_hour_end]
+    same_hour_minutes = _slice_by_open_time(minute_candles, minute_open_times, entry_minute_end, first_hour_end)
     same_hour_hit = _resolve_hour_interval(
         candles=same_hour_minutes,
         side=position.side,
@@ -159,6 +164,7 @@ def resolve_exit_hierarchical(
         resolution_level=ResolutionLevel.HOUR,
         agg_trade_loader=agg_trade_loader,
         minute_candles=minute_candles,
+        minute_open_times=minute_open_times,
     )
     if hour_hit is not None:
         return hour_hit
@@ -214,6 +220,7 @@ def _resolve_candles(
     resolution_level: ResolutionLevel,
     agg_trade_loader: AggTradeLoader,
     minute_candles: list[Candle] | None = None,
+    minute_open_times: list[datetime] | None = None,
 ) -> ExitResolution | None:
     for candle in candles:
         outcome = _barrier_outcome(candle, side, tp_price, sl_price)
@@ -233,7 +240,7 @@ def _resolve_candles(
                 return nested
             return ExitResolution(ExitReason.SL, candle.close_time, sl_price, ResolutionLevel.MINUTE)
         elif resolution_level is ResolutionLevel.HOUR and minute_candles is not None:
-            hour_minutes = [minute for minute in minute_candles if candle.open_time <= minute.open_time < candle.close_time]
+            hour_minutes = _slice_by_open_time(minute_candles, minute_open_times, candle.open_time, candle.close_time)
             nested = _resolve_candles(
                 hour_minutes,
                 side=side,
@@ -280,7 +287,7 @@ def _resolve_with_agg_trades(
     sl_price: float,
     start_time: datetime,
 ) -> ExitResolution | None:
-    for trade in sorted(trades, key=lambda item: (item.timestamp, item.trade_id)):
+    for trade in trades:
         if trade.timestamp < start_time:
             continue
         if side is Side.LONG:
@@ -329,6 +336,19 @@ def _barrier_outcome(candle: Candle, side: Side, tp_price: float, sl_price: floa
 
 def _price_for_reason(position: Position, reason: ExitReason) -> float:
     return position.tp_price if reason is ExitReason.TP else position.sl_price
+
+
+def _slice_by_open_time(
+    candles: list[Candle],
+    open_times: list[datetime] | None,
+    start: datetime,
+    end: datetime,
+) -> list[Candle]:
+    if open_times is not None:
+        left = bisect_left(open_times, start)
+        right = bisect_left(open_times, end)
+        return candles[left:right]
+    return [c for c in candles if start <= c.open_time < end]
 
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:

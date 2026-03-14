@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
 from statistics import mean, median, pstdev
 
 from .models import Candle, CycleStats
@@ -8,12 +7,12 @@ from .models import Candle, CycleStats
 
 def scan_symbol_cycles(
     symbol: str,
-    daily_candles: Iterable[Candle],
+    daily_candles: list[Candle],
     *,
     percent_limit: float = 8.0,
     stdev_limit: float = 8.0,
 ) -> CycleStats | None:
-    candles = sorted(daily_candles, key=lambda item: item.open_time)
+    candles = daily_candles
     if len(candles) < 3:
         return None
     pump_events = [candle.open_time for candle in candles if _pump_change_pct(candle) > percent_limit]

@@ -9,6 +9,19 @@ from .models import CapitalMode, CollisionPolicy, WalkForwardGrid
 
 
 @dataclass(slots=True, frozen=True)
+class ScannerParamSet:
+    percent_limit: float
+    stdev_limit: float
+    warmup_days: int
+
+
+_DEFAULT_SCANNER_PARAM_SETS: tuple[ScannerParamSet, ...] = (
+    ScannerParamSet(percent_limit=10.0, stdev_limit=12.0, warmup_days=365),
+    ScannerParamSet(percent_limit=8.0, stdev_limit=12.0, warmup_days=500),
+)
+
+
+@dataclass(slots=True, frozen=True)
 class BacktestConfig:
     start: datetime
     end: datetime
@@ -26,6 +39,11 @@ class BacktestConfig:
     exact_mode_max_history_days: int = 365
     use_closed_candles_only: bool = True
     use_previous_day_fng: bool = True
+    scanner_param_sets: tuple[ScannerParamSet, ...] = _DEFAULT_SCANNER_PARAM_SETS
+
+    @property
+    def scanner_warmup_days(self) -> int:
+        return max(s.warmup_days for s in self.scanner_param_sets)
 
 
 @dataclass(slots=True, frozen=True)
@@ -90,6 +108,18 @@ def load_config(path: str | Path) -> AppConfig:
     bots_raw = raw.get("bots", [])
     walk_forward_raw = raw.get("walk_forward", {})
 
+    scanner_sets_raw = backtest_raw.get("scanner_param_sets")
+    if scanner_sets_raw is not None:
+        scanner_param_sets = tuple(
+            ScannerParamSet(
+                percent_limit=item["percent_limit"],
+                stdev_limit=item["stdev_limit"],
+                warmup_days=item["warmup_days"],
+            )
+            for item in scanner_sets_raw
+        )
+    else:
+        scanner_param_sets = _DEFAULT_SCANNER_PARAM_SETS
     backtest = BacktestConfig(
         start=_normalize_datetime(backtest_raw["start"]),
         end=_normalize_datetime(backtest_raw["end"]),
@@ -107,6 +137,7 @@ def load_config(path: str | Path) -> AppConfig:
         exact_mode_max_history_days=backtest_raw.get("exact_mode_max_history_days", 365),
         use_closed_candles_only=backtest_raw.get("use_closed_candles_only", True),
         use_previous_day_fng=backtest_raw.get("use_previous_day_fng", True),
+        scanner_param_sets=scanner_param_sets,
     )
     execution = ExecutionConfig(
         taker_fee_rate=execution_raw.get("taker_fee_rate", 0.0005),

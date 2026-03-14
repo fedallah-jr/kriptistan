@@ -93,6 +93,7 @@ class Backtester:
                 )
             )
 
+        runtime_by_name: dict[str, BotRuntime] = {r.config.name: r for r in runtimes}
         timestamps = self.bundle.hourly_timestamps(start=start_time, end=end_time)
         for timestamp in timestamps:
             self._settle_due_trades(runtimes, timestamp)
@@ -166,7 +167,7 @@ class Backtester:
 
             winners, rejections = resolve_collisions(claims, policy=policy, timestamp=timestamp, shuffle_seed=seed)
             for rejected in rejections:
-                runtime = _runtime_for_bot(runtimes, rejected.claim.bot_name)
+                runtime = runtime_by_name[rejected.claim.bot_name]
                 runtime.ledger.reject(rejected.reason)
 
             selected_by_bot: dict[str, list[EntryClaim]] = {}
@@ -174,7 +175,7 @@ class Backtester:
                 selected_by_bot.setdefault(claim.bot_name, []).append(claim)
             accepted_claims: list[EntryClaim] = []
             for bot_name, bot_claims in selected_by_bot.items():
-                runtime = _runtime_for_bot(runtimes, bot_name)
+                runtime = runtime_by_name[bot_name]
                 ranked = sorted(bot_claims, key=lambda item: (-item.signal_strength, -item.technical_score, item.symbol))
                 accepted = ranked[: runtime.available_slots]
                 for rejected in ranked[runtime.available_slots :]:
@@ -186,7 +187,7 @@ class Backtester:
                 key=lambda item: (-item.signal_strength, -item.technical_score, -item.fixed_priority, item.bot_name, item.symbol),
             )
             for claim in accepted_claims:
-                runtime = _runtime_for_bot(runtimes, claim.bot_name)
+                runtime = runtime_by_name[claim.bot_name]
                 trade = self._open_trade(runtime, claim, end_time)
                 if trade is None:
                     continue
@@ -211,7 +212,7 @@ class Backtester:
             return cached
         candidates: list[Candidate] = []
         for symbol in self.bundle.symbols:
-            stats = self.bundle.cycle_stats_as_of(symbol, timestamp)
+            stats = self.bundle.multi_set_cycle_stats_as_of(symbol, timestamp, self.config.backtest.scanner_param_sets)
             if stats is None or not stats.passes_stdev_filter:
                 continue
             distance = min(
@@ -462,7 +463,3 @@ def _effective_tp_sl(bot: BotConfig) -> tuple[float, float]:
     if not bot.reverse_mode:
         return bot.tp_percent, bot.sl_percent
     return bot.sl_percent, bot.tp_percent
-
-
-def _runtime_for_bot(runtimes: list[BotRuntime], bot_name: str) -> BotRuntime:
-    return next(runtime for runtime in runtimes if runtime.config.name == bot_name)

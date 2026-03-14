@@ -59,7 +59,7 @@ def symbol_on_cooldown(closed_times: list[datetime], *, now: datetime, cooldown_
     if not closed_times:
         return False
     cutoff = now - timedelta(hours=cooldown_hours)
-    return max(closed_times) >= cutoff
+    return closed_times[-1] >= cutoff
 
 
 def dead_end_blacklisted(
